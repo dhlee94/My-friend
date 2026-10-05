@@ -1,0 +1,60 @@
+# Mac (Apple Silicon):  docker compose --profile cpu up --build
+# Linux + NVIDIA GPU:   docker compose --profile cuda up --build
+# → http://localhost:${MY_FRIEND_PORT:-8000}
+
+x-common: &common
+  env_file:
+    - .env                                  # ANTHROPIC_API_KEY 등 (.env.example 참고)
+  # environment는 서비스별로 정의: YAML merge(<<)는 얕은 병합이라 공통 블록이 통째로 덮어써진다
+  ports:
+    - "${MY_FRIEND_PORT:-8000}:8000"
+  volumes:
+    - ./data:/app/data                      # RAG 인덱스 (python -m my_friend.rag.pipeline build ...)
+    - hf-cache:/cache/huggingface           # bge-m3 가중치 캐시 (재빌드해도 재다운로드 없음)
+  restart: unless-stopped
+  init: false                               # 이미지에 tini가 PID 1로 들어 있음
+  shm_size: "2gb"                           # torch DataLoader/공유메모리 텐서용 (기본 64MB는 부족)
+
+services:
+  my-friend-cpu:
+    <<: *common
+    profiles: ["cpu"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    image: my-friend:cpu                    # 빌드 호스트 아키텍처를 따른다 (Apple Silicon → arm64)
+    environment:
+      RAG_INDEX_DIR: /app/data/index        # 인덱스가 없으면 RAG 없이 동작
+      SANDBOX_TIMEOUT_S: "120"
+      REVIEW_TIMEOUT_S: "3600"
+      SANDBOX_DEVICE: cpu
+      MY_FRIEND_DEVICE: cpu                 # 컨테이너에선 MPS 불가 → 임베딩도 CPU
+
+  my-friend-cuda:
+    <<: *common
+    profiles: ["cuda"]
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu130
+    image: my-friend:cuda
+    environment:
+      RAG_INDEX_DIR: /app/data/index
+      SANDBOX_TIMEOUT_S: "120"
+      REVIEW_TIMEOUT_S: "3600"
+      SANDBOX_DEVICE: cpu                   # 검증은 작은 dims라 CPU가 결정적이고 충분 (cuda로 바꾸면 GPU 메모리 실측)
+      MY_FRIEND_DEVICE: cuda                # bge-m3 임베딩은 GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:
