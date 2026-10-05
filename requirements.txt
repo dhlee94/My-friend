@@ -1,0 +1,27 @@
+# my-friend runtime dependencies (Python >= 3.11).
+# 하한 = 2026-10 기준 검증 버전, 상한 = 다음 메이저 (API 변경 차단).
+#
+# torch는 플랫폼별 휠 인덱스가 달라 Dockerfile에서 먼저 설치한다:
+#   CPU (Mac arm64 / Linux):  --index-url https://download.pytorch.org/whl/cpu
+#   CUDA (Linux amd64):       --index-url https://download.pytorch.org/whl/cu130
+# 로컬 Mac(MPS) 네이티브 실행은 PyPI 기본 휠로 충분: pip install -r requirements.txt
+
+# --- LLM / orchestration
+anthropic>=1.11,<2
+langgraph>=1.2,<2
+langgraph-checkpoint>=4.2,<5
+pydantic>=2.7,<3
+typing_extensions>=4.12
+
+# --- UI
+chainlit>=2.12,<3
+
+# --- RAG
+numpy>=2.0,<3
+tiktoken>=0.14,<1
+nltk>=3.10,<4
+sentence-transformers>=6.1,<7
+
+# --- model code runtime (validator 샌드박스가 생성 코드를 실행)
+torch>=2.14,<3
+lightning>=2.6,<3

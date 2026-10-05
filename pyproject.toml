@@ -1,0 +1,33 @@
+[project]
+name = "my-friend"
+version = "0.1.0"
+description = "LangGraph-based AI pair-programming partner for implementing ML papers in PyTorch"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.26",
+    "tiktoken>=0.7",
+    "nltk>=3.8",
+    "anthropic>=0.125",
+    "pydantic>=2.7",
+    "typing_extensions>=4.12",
+    "langgraph>=0.6",
+]
+
+[project.optional-dependencies]
+# torch는 플랫폼별 인덱스가 달라서 extras로 분리 (mps: PyPI 기본 휠, cuda: 서버 Dockerfile에서 cu 인덱스 지정)
+embed = ["sentence-transformers>=3.0", "torch>=2.3"]
+# validator 샌드박스가 생성 코드를 실행하는 인터프리터에 필요
+train = ["torch>=2.3", "lightning>=2.3"]
+# Chainlit UI: Python >= 3.11 필요 (LangGraph interrupt in async + sync nodes)
+ui = ["chainlit>=2.12,<3"]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["my_friend"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
