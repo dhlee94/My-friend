@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+data/index/
+workspace/
+.env
+ui/.files/
+ui/.chainlit/translations/
+.env.*
+!.env.example
