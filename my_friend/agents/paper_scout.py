@@ -25,7 +25,7 @@ class PaperScout:
     def __call__(self, state: GraphState) -> dict:
         request = state["request"]
         effort = self.deps.effort["paper_scout"]
-        plan = self.deps.llm.parse(
+        plan = self.deps.llm_for("paper_scout").parse(
             prompts.SCOUT_PLAN,
             compose(section("conversation", render_history(state, 4)), section("request", request)),
             ScoutSearchPlan,
@@ -48,7 +48,7 @@ class PaperScout:
         if not entries and not local:
             report = ScoutReport(papers=[], trends=[], digest="관련 논문을 찾지 못했습니다. " + " ".join(notes))
         else:
-            report = self.deps.llm.parse(
+            report = self.deps.llm_for("paper_scout").parse(
                 prompts.SCOUT_SUMMARIZE,
                 compose(
                     section("request", request),

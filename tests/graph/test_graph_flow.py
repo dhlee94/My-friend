@@ -277,6 +277,17 @@ def test_sqlite_checkpointer_survives_restart(tmp_path):
     assert llm2.remaining() == {}
 
 
+def test_per_node_llm_routing():
+    """llms에 지정한 노드만 해당 LLM으로, 나머지는 기본 llm으로 간다."""
+    router_llm = ScriptedLLM({RouteDecision: [RouteDecision(mode="full_build", reason="new")]})
+    llm = ScriptedLLM({**scout_plans(), type(tiny_spec()): [tiny_spec()]})
+    deps = AgentDeps(llm=llm, llms={"router": router_llm}, sandbox=SubprocessSandbox(timeout_s=120))
+    r = Session(build_graph(deps)).send("모델 만들어줘")
+    assert r.pending_review["kind"] == "plan"
+    assert [n for n, _, _ in router_llm.calls] == ["RouteDecision"]
+    assert [n for n, _, _ in llm.calls] == ["ScoutSearchPlan", "ModelSpec"]
+
+
 def test_explicit_mode_skips_router_llm():
     llm, s = make({**scout_steps(), SparringTurn: [sparring_turn()]}, arxiv=FakeArxiv())
     r = s.send("질문", mode="sparring")

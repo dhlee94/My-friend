@@ -17,7 +17,7 @@ class Executor:
         self.deps = deps
 
     def __call__(self, state: GraphState) -> dict:
-        bundle = self.deps.llm.parse(
+        bundle = self.deps.llm_for("executor").parse(
             prompts.EXECUTOR,
             compose(
                 section("spec", render_spec(state)),
@@ -87,7 +87,7 @@ class PartialExecutor:
             # 대상 심볼을 못 찾았거나 파일이 작으면 전체 코드도 제공
             section("code", render_files(files, self.deps.max_file_chars)) if not files or len(files) <= 2 else "",
         )
-        patchset = self.deps.llm.parse(
+        patchset = self.deps.llm_for("partial_executor").parse(
             prompts.PARTIAL_EXECUTOR, user, PatchSet,
             effort=self.deps.effort["partial_executor"], max_tokens=32000,
         )

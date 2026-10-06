@@ -33,7 +33,7 @@ class Router:
 
         files = state.get("files") or {}
         workspace = f"files={sorted(files)}; spec={'yes: ' + state['spec'].name if state.get('spec') else 'none'}"
-        decision = self.deps.llm.parse(
+        decision = self.deps.llm_for("router").parse(
             prompts.ROUTER,
             compose(
                 section("conversation", render_history(state, 6)),
