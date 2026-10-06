@@ -29,13 +29,14 @@ from chainlit.input_widget import Select, Slider  # noqa: E402
 from my_friend.agents.base import AgentDeps  # noqa: E402
 from my_friend.agents.planner import render_spec_md  # noqa: E402
 from my_friend.core.llm import DEFAULT_MODEL, AnthropicLLM  # noqa: E402
-from my_friend.graph.builder import build_graph  # noqa: E402
+from my_friend.graph.builder import build_graph, make_async_checkpointer  # noqa: E402
 from my_friend.tools.arxiv import ArxivClient  # noqa: E402
 from my_friend.tools.sandbox import SubprocessSandbox  # noqa: E402
 from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md  # noqa: E402
 from ui.runner import GraphRunner  # noqa: E402
 
 REVIEW_TIMEOUT_S = int(os.environ.get("REVIEW_TIMEOUT_S", "3600"))
+CHECKPOINT_DB = os.environ.get("CHECKPOINT_DB", str(ROOT / "data" / "checkpoints.sqlite"))
 
 NODE_LABEL = {
     "router": "🧭 Router",
@@ -56,7 +57,7 @@ _graph = None
 _graph_lock = asyncio.Lock()
 
 
-def _build_graph():
+def _build_graph(checkpointer):
     retriever = None
     index_dir = os.environ.get("RAG_INDEX_DIR")
     if index_dir and (Path(index_dir) / "manifest.json").exists():
@@ -79,15 +80,17 @@ def _build_graph():
         arxiv=None if os.environ.get("DISABLE_ARXIV") == "1" else ArxivClient(),
         retriever=retriever,
     )
-    # 그래프/MemorySaver는 프로세스 전역 1개: 세션 격리는 thread_id로. (멀티 워커면 SqliteSaver 등 공유 저장소 필요)
-    return build_graph(deps)
+    # 그래프/체크포인터는 프로세스 전역 1개: 세션 격리는 thread_id로.
+    return build_graph(deps, checkpointer)
 
 
 async def get_graph():
     global _graph
     async with _graph_lock:
         if _graph is None:
-            _graph = await cl.make_async(_build_graph)()
+            # aiosqlite 커넥션은 이벤트 루프에서 열고, 무거운 그래프 구성(bge-m3 로드)만 스레드로 넘긴다
+            checkpointer = await make_async_checkpointer(CHECKPOINT_DB)
+            _graph = await cl.make_async(_build_graph)(checkpointer)
     return _graph
 
 
@@ -211,7 +214,8 @@ class ChainlitPresenter:
 @cl.on_chat_start
 async def on_chat_start() -> None:
     graph = await get_graph()
-    runner = GraphRunner(graph, thread_id=uuid.uuid4().hex)
+    # Chainlit thread id와 일치시켜 둔다: data layer를 붙이면 on_chat_resume에서 같은 체크포인트를 이어받는다
+    runner = GraphRunner(graph, thread_id=cl.context.session.thread_id or uuid.uuid4().hex)
     cl.user_session.set("runner", runner)
     cl.user_session.set("settings", {"mode": "auto", "max_iterations": 3})
     await cl.ChatSettings([

@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 data/index/
+data/checkpoints.sqlite*
 workspace/
 .env
 ui/.files/

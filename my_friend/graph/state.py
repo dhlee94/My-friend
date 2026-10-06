@@ -1,9 +1,9 @@
 """그래프 상태.
 
 수명 주기가 다른 두 종류의 필드가 섞여 있다:
-  - 세션 지속(MemorySaver가 thread_id 단위로 보존): messages, files, entry_file, spec, scout
+  - 세션 지속(체크포인터가 thread_id 단위로 보존): messages, files, entry_file, spec, scout
     → 다음 턴의 sparring 부분 수정이 이전 full build 결과 위에서 동작한다.
-  - 턴 단위(router가 매 턴 초기화): change, review, validation, reflection, iteration, sparring
+  - 턴 단위(turn_start가 매 턴 초기화): change, review, validation, reflection, iteration, sparring
 """
 from __future__ import annotations
 

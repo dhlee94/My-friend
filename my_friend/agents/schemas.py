@@ -64,6 +64,9 @@ class SparringTurn(BaseModel):
     proposed_change: Optional[ChangeRequest] = Field(
         description="null while still discussing; set once a concrete code change is agreed"
     )
+    escalate: bool = Field(
+        description="true when the request needs a new architecture / substantial rewrite → hand off to the planner"
+    )
 
 
 # --------------------------------------------------------------- planner

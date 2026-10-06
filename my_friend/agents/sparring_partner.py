@@ -3,7 +3,7 @@ from __future__ import annotations
 from my_friend.graph.state import GraphState
 
 from . import prompts
-from .base import AgentDeps, assistant_turn, compose, render_files, render_history, section
+from .base import AgentDeps, assistant_turn, compose, render_files, render_history, render_scout, section
 from .schemas import SparringTurn
 
 
@@ -15,7 +15,9 @@ def render_turn(t: SparringTurn) -> str:
         out.append(f"\n**추천:** {t.recommendation}")
     if t.questions:
         out.append("\n" + "\n".join(f"Q. {q}" for q in t.questions))
-    if t.proposed_change:
+    if t.escalate:
+        out.append("\n**→ 새 아키텍처가 필요해 Full-Build(Planner)로 전환합니다.**")
+    elif t.proposed_change:
         c = t.proposed_change
         out.append(f"\n**제안 변경:** {c.summary}\n  대상: {', '.join(c.target_symbols)}\n  shape: {'; '.join(c.expected_shape_changes)}")
     return "\n".join(out)
@@ -26,16 +28,10 @@ class SparringPartner:
         self.deps = deps
 
     def __call__(self, state: GraphState) -> dict:
-        scout = state.get("scout")
-        scout_txt = ""
-        if scout:
-            scout_txt = scout.digest + "\n" + "\n".join(f"- trend: {t}" for t in scout.trends) + "\n" + "\n".join(
-                f"- [{p.arxiv_id}] {p.title} ({p.published[:10]}): {p.key_idea}" for p in scout.papers
-            )
         turn = self.deps.llm.parse(
             prompts.SPARRING,
             compose(
-                section("scout_digest", scout_txt),
+                section("scout_digest", render_scout(state)),
                 section("code", render_files(state.get("files") or {}, self.deps.max_file_chars)),
                 section("conversation", render_history(state, self.deps.history_turns)),
                 section("request", state["request"]),
@@ -44,8 +40,11 @@ class SparringPartner:
             effort=self.deps.effort["sparring_partner"],
             max_tokens=16000,
         )
-        return {
+        update: dict = {
             "sparring": turn,
-            "change": turn.proposed_change,
+            "change": None if turn.escalate else turn.proposed_change,
             "messages": [assistant_turn("sparring_partner", render_turn(turn))],
         }
+        if turn.escalate:
+            update.update(mode="full_build", route_reason="escalated by sparring_partner")
+        return update

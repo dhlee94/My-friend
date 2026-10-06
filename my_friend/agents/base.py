@@ -66,6 +66,17 @@ def render_spec(state: "GraphState") -> str:
     return json.dumps(spec.model_dump(), ensure_ascii=False, indent=1) if spec else ""
 
 
+def render_scout(state: "GraphState") -> str:
+    scout = state.get("scout")
+    if not scout:
+        return ""
+    return "\n".join(
+        [scout.digest]
+        + [f"- trend: {t}" for t in scout.trends]
+        + [f"- [{p.arxiv_id}] {p.title} ({p.published[:10]}): {p.key_idea}" for p in scout.papers]
+    )
+
+
 def render_validation(state: "GraphState", max_shape_rows: int = 80) -> str:
     v = state.get("validation")
     if v is None:

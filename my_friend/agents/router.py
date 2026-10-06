@@ -3,26 +3,30 @@ from __future__ import annotations
 from my_friend.graph.state import PER_TURN_RESET, GraphState
 
 from . import prompts
-from .base import AgentDeps, compose, render_history, section
+from .base import AgentDeps, compose, render_history, render_scout, section
 from .schemas import RouteDecision
 
 DEFAULT_MAX_ITERATIONS = 3
 
 
+def begin_turn(state: GraphState) -> dict:
+    """턴 진입점(LLM 없음): 턴 단위 상태 초기화 + 사용자 발화 기록. scout보다 먼저 실행되어야 한다."""
+    return {
+        **PER_TURN_RESET,
+        "max_iterations": state.get("max_iterations") or DEFAULT_MAX_ITERATIONS,
+        "messages": [{"role": "user", "name": "user", "content": state["request"]}],
+    }
+
+
 class Router:
-    """턴 진입점: 턴 단위 상태 초기화 + 모드 결정 (사용자 지정 > LLM 분류)."""
+    """scout 이후 모드 결정 (사용자 지정 > LLM 분류). scout 결과를 경중 판단 근거로 쓴다."""
 
     def __init__(self, deps: AgentDeps) -> None:
         self.deps = deps
 
     def __call__(self, state: GraphState) -> dict:
         request = state["request"]
-        update: dict = {
-            **PER_TURN_RESET,
-            "requested_mode": None,     # 1회성 오버라이드 소비
-            "max_iterations": state.get("max_iterations") or DEFAULT_MAX_ITERATIONS,
-            "messages": [{"role": "user", "name": "user", "content": request}],
-        }
+        update: dict = {"requested_mode": None}     # 1회성 오버라이드 소비
         if state.get("requested_mode"):
             update.update(mode=state["requested_mode"], route_reason="user override")
             return update
@@ -33,6 +37,7 @@ class Router:
             prompts.ROUTER,
             compose(
                 section("conversation", render_history(state, 6)),
+                section("scout_digest", render_scout(state)),
                 section("workspace", workspace),
                 section("request", request),
             ),

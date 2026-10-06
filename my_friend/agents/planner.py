@@ -5,7 +5,7 @@ import json
 from my_friend.graph.state import GraphState
 
 from . import prompts
-from .base import AgentDeps, assistant_turn, compose, render_history, render_spec, section
+from .base import AgentDeps, assistant_turn, compose, render_history, render_scout, render_spec, section
 from .schemas import ModelSpec
 
 
@@ -40,6 +40,7 @@ class Planner:
         spec = self.deps.llm.parse(
             prompts.PLANNER,
             compose(
+                section("scout_digest", render_scout(state)),
                 section("reference_passages", refs),
                 # revise 루프: 직전 명세 + (history에 추가된) 사용자 피드백을 반영해 수정
                 section("previous_spec", render_spec(state)),
