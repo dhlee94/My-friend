@@ -330,6 +330,11 @@ def validation_summary_md(v: ValidationReport) -> str:
         )
     if v.leakage.checked:
         lines.append(f"**Leakage probe:** {'🚨 LEAK' if v.leakage.leaked else 'ok'} (max\\|Δ\\|={v.leakage.max_abs_diff:.2e}) — {v.leakage.detail}")
+    lt = v.lightning
+    if lt.checked:
+        lines.append(f"**Lightning** `{lt.lit_class or lt.file}`: " + (
+            f"❌ {lt.error}" if lt.error else
+            f"✅ fast_dev_run · loss={lt.loss:.4g} · batch `{lt.batch_format}` · validation_step {lt.validation_step}"))
     if v.unused_params:
         lines.append("**Unused params:** " + ", ".join(f"`{p}`" for p in v.unused_params[:8]))
     if v.shape_mismatches:

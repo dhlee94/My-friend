@@ -4,6 +4,8 @@ from my_friend.tools.arxiv import parse_feed
 from my_friend.tools.code_patch import PatchError, extract_symbol, outline, replace_symbol
 from my_friend.tools.sandbox import SubprocessSandbox, resolve_dim
 
+from my_friend.agents.schemas import ModuleSpec, TensorSpec
+
 from .fixtures import CAUSAL_FORWARD, LEAKY_FORWARD, model_source, tiny_spec
 
 pytest.importorskip("torch")
@@ -141,6 +143,88 @@ def test_tests_not_run_when_harness_fails_but_run_without_spec(sandbox):
     assert v.failed_stage == "leakage" and v.tests_status is None
     v = sandbox.validate({"model.py": model_source(CAUSAL_FORWARD), "test_model.py": GOOD_TEST}, None, None)
     assert v.status == "skipped" and v.tests_status == "pass"
+
+
+LIT = """import torch
+import torch.nn.functional as F
+try:
+    import lightning.pytorch as pl
+except ImportError:
+    import pytorch_lightning as pl
+
+
+class LitTS(pl.LightningModule):
+    def __init__(self, model, lr=1e-2):
+        super().__init__()
+        self.model, self.lr = model, lr
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        loss = F.mse_loss(self.model(x), y)
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        self.log("val_loss", F.mse_loss(self.model(x), y))
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.parameters(), lr=self.lr)
+"""
+
+
+def _lit(sandbox, lit_src, files=None, spec=None):
+    files = files or {"model.py": model_source(CAUSAL_FORWARD)}
+    return sandbox.validate({**files, "lit_module.py": lit_src}, spec or tiny_spec(), "model.py")
+
+
+def test_lightning_fast_dev_run_passes(sandbox):
+    v = _lit(sandbox, LIT)
+    assert v.status == "pass", v.error
+    lt = v.lightning
+    assert lt.checked and lt.lit_class == "LitTS" and lt.constructed_by == "lit(model)"
+    assert lt.batch_format == "regression" and lt.params_updated and lt.validation_step == "ran"
+    assert lt.loss is not None and lt.loss == lt.loss
+
+
+@pytest.mark.parametrize("mutate, needle", [
+    (lambda s: s.replace("return loss\n", "return loss * float('nan')\n"), "non-finite"),
+    (lambda s: s.replace("lr=1e-2", "lr=0.0"), "did not change any parameter"),
+    (lambda s: s.replace("x, y = batch\n        loss", "x, y = batch\n        raise ValueError('bad batch')\n        loss"),
+     "bad batch"),
+    (lambda s: s.replace("def __init__(self, model, lr=1e-2)", "def __init__(self, model, hidden, lr=1e-2)"),
+     "cannot construct LightningModule"),
+])
+def test_lightning_failures_fail_validation(sandbox, mutate, needle):
+    v = _lit(sandbox, mutate(LIT))
+    assert v.status == "fail" and v.failed_stage == "lightning", v.error
+    assert needle in v.error and v.lightning.checked
+
+
+def test_lightning_classification_target_and_no_val_step(sandbox):
+    model = (
+        "import torch\nfrom torch import nn\n\n\nclass TinyCls(nn.Module):\n"
+        "    def __init__(self):\n        super().__init__()\n        self.proj = nn.Linear(3, 4)\n\n"
+        "    def forward(self, x):\n        return self.proj(x)\n"
+    )
+    lit = LIT.replace("loss = F.mse_loss(self.model(x), y)",
+                      "loss = F.cross_entropy(self.model(x).reshape(-1, 4), y.reshape(-1))")
+    lit = lit[: lit.index("    def validation_step")] + lit[lit.index("    def configure_optimizers"):]
+    spec = tiny_spec(entry_class="TinyCls", init_kwargs_json="{}", causal_axis=None,
+                     outputs=[TensorSpec(name="logits", shape=["B", "T", "4"])],
+                     modules=[ModuleSpec(path="proj", role="p", input_shape=["B", "T", "F"],
+                                         output_shape=["B", "T", "4"], complexity="-")])
+    v = _lit(sandbox, lit, {"model.py": model}, spec)
+    assert v.status == "pass", v.error
+    assert v.lightning.batch_format == "classification" and v.lightning.validation_step == "absent"
+
+
+def test_lightning_skipped_without_module_or_when_harness_fails(sandbox):
+    v = sandbox.validate({"model.py": model_source(CAUSAL_FORWARD), "lit_module.py": "import torch\n"},
+                         tiny_spec(), "model.py")
+    assert v.status == "pass" and not v.lightning.checked
+    v = _lit(sandbox, LIT, {"model.py": model_source(LEAKY_FORWARD)})
+    assert v.failed_stage == "leakage" and not v.lightning.checked
 
 
 def test_sandbox_rejects_path_escape(sandbox):

@@ -153,9 +153,23 @@ class LeakageProbe(BaseModel):
     detail: str = ""
 
 
+class LightningProbe(BaseModel):
+    """Trainer(fast_dev_run=1)로 LightningModule을 1 step 학습/검증한 결과."""
+
+    checked: bool
+    file: Optional[str] = None
+    lit_class: Optional[str] = None
+    constructed_by: Optional[str] = None     # lit(model) | lit(**init_kwargs) | lit()
+    batch_format: Optional[str] = None       # regression | classification (통과한 target 관례)
+    loss: Optional[float] = None
+    params_updated: Optional[bool] = None
+    validation_step: Optional[str] = None    # ran | absent
+    error: Optional[str] = None
+
+
 class ValidationReport(BaseModel):
     status: Literal["pass", "fail", "skipped"]
-    failed_stage: Optional[str] = None      # compile | import | build | forward | backward | shape | numerical | leakage | tests
+    failed_stage: Optional[str] = None      # compile | import | build | forward | backward | shape | numerical | leakage | lightning | tests
     error: Optional[str] = None
     traceback: Optional[str] = None
     meta_pass: Optional[str] = None         # ok | data_dependent | error: ...
@@ -169,6 +183,7 @@ class ValidationReport(BaseModel):
     nan_detected: bool = False
     unused_params: List[str] = []
     leakage: LeakageProbe = LeakageProbe(checked=False)
+    lightning: LightningProbe = LightningProbe(checked=False)
     # 생성된 test_*.py를 pytest로 실행한 결과. None = 테스트 파일 없음
     tests_status: Optional[Literal["pass", "fail", "not_run"]] = None
     tests_detail: str = ""

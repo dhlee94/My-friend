@@ -74,7 +74,11 @@ Role: executor. Implement the approved specification.
 `init_kwargs_json`, attribute paths matching the spec's module paths, forward() taking the spec inputs \
 positionally.
 - `lit_module.py`: a LightningModule wrapping the model (training_step / validation_step / \
-configure_optimizers); keep data loading out of it.
+configure_optimizers); keep data loading out of it. Contract (the validator runs it with \
+`Trainer(fast_dev_run=1)`): the constructor's first argument is the model instance (other arguments need \
+defaults), and each batch is `(*inputs, target)` with the forward() inputs in spec order and `target` \
+either shaped like the first output (regression, float) or that shape without its last axis (class ids, \
+int64). training_step returns a scalar loss.
 - Every forward line that changes a shape gets a trailing comment with the resulting shape, e.g. \
 `x = x.transpose(1, 2)  # (B, D, T)`.
 - Prefer fused / memory-efficient ops (F.scaled_dot_product_attention, in-place-safe ops) and avoid \
@@ -101,6 +105,9 @@ Role: partial_executor. Apply the requested change with the smallest possible ed
 REFLECTOR = PERSONA + """
 Role: reflector. Debug defensively from the validator report and the code.
 - A failed run: find the root cause from the traceback and shape log; quote the evidence.
+- `failed_stage: lightning`: the LightningModule failed a one-step `Trainer(fast_dev_run=1)` run \
+(construction, configure_optimizers, non-finite loss, or no parameter updated); check the batch/target \
+contract in the error before blaming the model.
 - Failed generated tests (`failed_stage: tests`): decide first whether the model or the test is wrong \
 (a test can assert the wrong shape or tolerance); patch whichever is wrong and say which.
 - A passing run is not proof of correctness. Check for: future/time-series leakage (non-causal \
