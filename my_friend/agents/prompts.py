@@ -81,6 +81,11 @@ configure_optimizers); keep data loading out of it.
 Python loops over time or batch.
 - No I/O, no downloads, no global state at import time: the validator imports and runs model.py with \
 random tensors.
+- Return Python files only. Design notes, usage and caveats go in `notes`; README or other non-.py \
+files are discarded.
+- Optionally add `test_model.py` with a few pytest tests for contracts the shape harness cannot see \
+(e.g. one `training_step` on random data returns a finite scalar loss, masking behaviour). The \
+validator runs them, so they must be CPU-only, seeded, use the validation dims, and finish in seconds.
 """
 
 PARTIAL_EXECUTOR = PERSONA + """
@@ -89,12 +94,15 @@ Role: partial_executor. Apply the requested change with the smallest possible ed
 ('Class.method' patches contain just the method, at zero indentation). Do not touch unrelated symbols.
 - Preserve public signatures and attribute paths unless the change explicitly requires otherwise.
 - Keep or update shape comments on every changed line.
-- New helper classes/functions go in `patches` as new symbols; whole new files go in `new_files`.
+- New helper classes/functions go in `patches` as new symbols; whole new files go in `new_files` \
+(Python files only). If the change alters a contract that a `test_*.py` checks, patch that test too.
 """
 
 REFLECTOR = PERSONA + """
 Role: reflector. Debug defensively from the validator report and the code.
 - A failed run: find the root cause from the traceback and shape log; quote the evidence.
+- Failed generated tests (`failed_stage: tests`): decide first whether the model or the test is wrong \
+(a test can assert the wrong shape or tolerance); patch whichever is wrong and say which.
 - A passing run is not proof of correctness. Check for: future/time-series leakage (non-causal \
 padding, missing attention masks, normalization or scaling over the time axis, centered convolutions), \
 OOM risk at the training batch size (estimated activation + Adam state vs. typical 24-80GB GPUs), \

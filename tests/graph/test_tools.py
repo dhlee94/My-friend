@@ -102,6 +102,47 @@ def test_harness_meta_fallback_for_data_dependent_ops(sandbox):
     assert v.meta_pass != "ok"
 
 
+GOOD_TEST = """import torch
+from model import TinyTS
+
+
+def test_output_shape():
+    torch.manual_seed(0)
+    m = TinyTS(3, 8, 3)
+    assert m(torch.randn(2, 16, 3)).shape == (2, 16, 1)
+"""
+
+
+def test_generated_tests_run_and_pass(sandbox):
+    files = {"model.py": model_source(CAUSAL_FORWARD), "test_model.py": GOOD_TEST}
+    v = sandbox.validate(files, tiny_spec(), "model.py")
+    assert v.status == "pass", v.error
+    assert v.tests_status == "pass" and "1 passed" in v.tests_detail
+
+
+def test_failing_generated_test_fails_validation(sandbox):
+    files = {"model.py": model_source(CAUSAL_FORWARD),
+             "test_model.py": GOOD_TEST.replace("(2, 16, 1)", "(2, 16, 2)")}
+    v = sandbox.validate(files, tiny_spec(), "model.py")
+    assert v.status == "fail" and v.failed_stage == "tests" and v.tests_status == "fail"
+    assert "test_output_shape" in v.error and "assert" in v.tests_detail
+    assert v.leakage.checked and v.param_count > 0          # 하네스 결과는 보존
+
+
+def test_broken_test_file_is_a_failure(sandbox):
+    files = {"model.py": model_source(CAUSAL_FORWARD), "test_model.py": "from model import Missing\n"}
+    v = sandbox.validate(files, tiny_spec(), "model.py")
+    assert v.failed_stage == "tests" and v.tests_status == "fail"
+
+
+def test_tests_not_run_when_harness_fails_but_run_without_spec(sandbox):
+    files = {"model.py": model_source(LEAKY_FORWARD), "test_model.py": GOOD_TEST}
+    v = sandbox.validate(files, tiny_spec(), "model.py")
+    assert v.failed_stage == "leakage" and v.tests_status is None
+    v = sandbox.validate({"model.py": model_source(CAUSAL_FORWARD), "test_model.py": GOOD_TEST}, None, None)
+    assert v.status == "skipped" and v.tests_status == "pass"
+
+
 def test_sandbox_rejects_path_escape(sandbox):
     v = sandbox.validate({"../evil.py": "x=1"}, None, None)
     assert v.status == "fail" and "escapes" in v.error

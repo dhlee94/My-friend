@@ -95,41 +95,88 @@ class SubprocessSandbox:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_text(src)
 
-            errors = _compile_all(root, [r for r in files if r.endswith(".py")])
-            if errors:
-                return ValidationReport(status="fail", failed_stage="compile", error=errors[0],
-                                        traceback="\n".join(errors), duration_s=round(time.time() - t0, 3))
-            if spec is None or not entry_file:
-                return ValidationReport(status="skipped", error="no ModelSpec: compiled only, forward not executed",
-                                        duration_s=round(time.time() - t0, 3))
-            try:
-                cfg = build_harness_config(spec, entry_file, self.device)
-            except ValueError as e:
-                return ValidationReport(status="fail", failed_stage="spec", error=str(e))
-            cfg["workdir"] = str(root)
-            cfg["result_path"] = str(root / "_result.json")
-            (root / "_config.json").write_text(json.dumps(cfg))
+            report = self._harness(root, files, spec, entry_file, t0)
+            tests = sorted(r for r in files if _is_test_file(r))
+            if tests and report.status in ("pass", "skipped"):
+                # 하네스(shape/누수/수치)가 통과한 코드에 한해 생성 테스트를 돌린다: 실패 원인을 섞지 않기 위해
+                self._run_tests(root, tests, report)
+            report.duration_s = round(time.time() - t0, 3)
+            return report
 
-            env = {k: v for k, v in os.environ.items() if not any(m in k.upper() for m in _SECRET_ENV_MARKERS)}
-            env["PYTHONDONTWRITEBYTECODE"] = "1"
-            try:
-                proc = subprocess.run(
-                    [self.python, str(_HARNESS), str(root / "_config.json")],
-                    cwd=root, env=env, capture_output=True, text=True, timeout=self.timeout_s,
-                )
-            except subprocess.TimeoutExpired:
-                return ValidationReport(status="fail", failed_stage="timeout",
-                                        error=f"validation exceeded {self.timeout_s}s (infinite loop or too-large dims?)",
-                                        duration_s=round(time.time() - t0, 3))
-            result_path = root / "_result.json"
-            if not result_path.exists():
-                # 하네스 자체가 죽음: segfault, OOM kill(-9) 등
-                return ValidationReport(status="fail", failed_stage="crash",
-                                        error=f"harness exited with code {proc.returncode}",
-                                        stderr_tail=proc.stderr[-2000:], duration_s=round(time.time() - t0, 3))
-            data = json.loads(result_path.read_text())
-            data["stderr_tail"] = proc.stderr[-2000:]
-            return ValidationReport.model_validate(data)
+    def _harness(self, root: Path, files: Dict[str, str], spec: Optional[ModelSpec],
+                 entry_file: Optional[str], t0: float) -> ValidationReport:
+        errors = _compile_all(root, [r for r in files if r.endswith(".py")])
+        if errors:
+            return ValidationReport(status="fail", failed_stage="compile", error=errors[0],
+                                    traceback="\n".join(errors), duration_s=round(time.time() - t0, 3))
+        if spec is None or not entry_file:
+            return ValidationReport(status="skipped", error="no ModelSpec: compiled only, forward not executed",
+                                    duration_s=round(time.time() - t0, 3))
+        try:
+            cfg = build_harness_config(spec, entry_file, self.device)
+        except ValueError as e:
+            return ValidationReport(status="fail", failed_stage="spec", error=str(e))
+        cfg["workdir"] = str(root)
+        cfg["result_path"] = str(root / "_result.json")
+        (root / "_config.json").write_text(json.dumps(cfg))
+
+        try:
+            proc = subprocess.run(
+                [self.python, str(_HARNESS), str(root / "_config.json")],
+                cwd=root, env=_sandbox_env(), capture_output=True, text=True, timeout=self.timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            return ValidationReport(status="fail", failed_stage="timeout",
+                                    error=f"validation exceeded {self.timeout_s}s (infinite loop or too-large dims?)",
+                                    duration_s=round(time.time() - t0, 3))
+        result_path = root / "_result.json"
+        if not result_path.exists():
+            # 하네스 자체가 죽음: segfault, OOM kill(-9) 등
+            return ValidationReport(status="fail", failed_stage="crash",
+                                    error=f"harness exited with code {proc.returncode}",
+                                    stderr_tail=proc.stderr[-2000:], duration_s=round(time.time() - t0, 3))
+        data = json.loads(result_path.read_text())
+        data["stderr_tail"] = proc.stderr[-2000:]
+        return ValidationReport.model_validate(data)
+
+    def _run_tests(self, root: Path, tests: List[str], report: ValidationReport) -> None:
+        """pytest 결과를 report에 기록. 테스트 실패 = 검증 실패(failed_stage="tests") → reflector가
+        모델이 틀렸는지 테스트가 틀렸는지 판단한다."""
+        cmd = [self.python, "-m", "pytest", "-q", "-x", "-rf", "-p", "no:cacheprovider", "--no-header", *tests]
+        try:
+            proc = subprocess.run(cmd, cwd=root, env=_sandbox_env(), capture_output=True, text=True,
+                                  timeout=self.timeout_s)
+        except subprocess.TimeoutExpired:
+            report.status, report.failed_stage = "fail", "tests"
+            report.tests_status = "fail"
+            report.error = f"generated tests exceeded {self.timeout_s}s"
+            return
+        out = (proc.stdout + proc.stderr)[-3000:]
+        if proc.returncode == 0:
+            report.tests_status = "pass"
+            report.tests_detail = (proc.stdout.strip().splitlines() or [""])[-1]       # "3 passed in 0.4s"
+        elif "No module named pytest" in proc.stderr:
+            report.tests_status, report.tests_detail = "not_run", "pytest가 샌드박스 인터프리터에 없음"
+        elif proc.returncode == 5:
+            report.tests_status, report.tests_detail = "not_run", "수집된 테스트 없음"
+        elif proc.returncode in (1, 2):                 # 1 = 테스트 실패, 2 = 수집 오류(테스트 파일 import 실패 등)
+            failed = [l for l in proc.stdout.splitlines() if l.startswith(("FAILED", "ERROR"))]
+            report.status, report.failed_stage = "fail", "tests"
+            report.tests_status, report.tests_detail = "fail", out
+            report.error = "; ".join(failed[:3]) or f"pytest exited with code {proc.returncode}"
+        else:                                           # 3/4 = pytest 내부/사용법 오류: 생성 코드 탓이 아님
+            report.tests_status, report.tests_detail = "not_run", f"pytest exited with code {proc.returncode}\n{out}"
+
+
+def _is_test_file(rel: str) -> bool:
+    name = Path(rel).name
+    return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _sandbox_env() -> Dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not any(m in k.upper() for m in _SECRET_ENV_MARKERS)}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
 
 
 def _compile_all(root: Path, rels: List[str]) -> List[str]:

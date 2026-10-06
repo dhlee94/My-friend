@@ -21,6 +21,8 @@ def summarize(v: ValidationReport) -> str:
     if v.unused_params:
         lines.append(f"unused params: {', '.join(v.unused_params[:5])}")
     lines += [f"shape ✗ {m}" for m in v.shape_mismatches[:5]]
+    if v.tests_status:
+        lines.append(f"generated tests: {v.tests_status}" + (f" — {v.tests_detail}" if v.tests_status != "fail" else ""))
     return "\n".join(lines)
 
 
