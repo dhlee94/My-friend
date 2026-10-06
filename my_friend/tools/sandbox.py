@@ -11,6 +11,7 @@ import json
 import operator
 import os
 import py_compile
+import re
 import subprocess
 import sys
 import tempfile
@@ -118,6 +119,9 @@ class SubprocessSandbox:
             return ValidationReport(status="fail", failed_stage="spec", error=str(e))
         cfg["workdir"] = str(root)
         cfg["result_path"] = str(root / "_result.json")
+        lit_file = _find_lightning_file(files)
+        if lit_file:
+            cfg["lightning"] = {"file": lit_file}
         (root / "_config.json").write_text(json.dumps(cfg))
 
         try:
@@ -166,6 +170,13 @@ class SubprocessSandbox:
             report.error = "; ".join(failed[:3]) or f"pytest exited with code {proc.returncode}"
         else:                                           # 3/4 = pytest 내부/사용법 오류: 생성 코드 탓이 아님
             report.tests_status, report.tests_detail = "not_run", f"pytest exited with code {proc.returncode}\n{out}"
+
+
+def _find_lightning_file(files: Dict[str, str]) -> Optional[str]:
+    """LightningModule을 정의하는 파일 (lit_module.py 우선). 테스트 파일은 제외."""
+    cands = sorted(r for r, src in files.items()
+                   if r.endswith(".py") and not _is_test_file(r) and re.search(r"\(\s*[\w.]*LightningModule\s*\)", src))
+    return "lit_module.py" if "lit_module.py" in cands else (cands[0] if cands else None)
 
 
 def _is_test_file(rel: str) -> bool:

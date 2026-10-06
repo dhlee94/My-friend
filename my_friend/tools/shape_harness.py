@@ -9,6 +9,8 @@
   3. real pass   : torch.randn 더미 입력으로 forward + backward (NaN/Inf, unused param, activation 메모리)
   4. shape check : planner 명세의 module output shape과 실측 비교
   5. leakage     : causal 축의 t0 이후 입력을 교란 → 출력[:t0]이 변하면 미래 정보 누수
+  6. lightning   : (LightningModule 파일이 있으면) Trainer(fast_dev_run=1)로 train/val 1 step —
+                   생성, configure_optimizers, 유한한 loss, 옵티마이저가 파라미터를 실제로 갱신했는지
 """
 from __future__ import annotations
 
@@ -240,6 +242,15 @@ def run(cfg: dict) -> dict:
             rep["leakage"] = {"checked": False, "leaked": False, "max_abs_diff": 0.0,
                               "detail": f"probe failed: {type(e).__name__}: {e}"}
 
+    # ---- 6. lightning: 앞 단계가 모두 통과한 모델에 대해서만 (실패 원인을 섞지 않기 위해)
+    rep["lightning"] = {"checked": False}
+    if cfg.get("lightning") and not mismatches and not rep["nan_detected"] and not rep["leakage"]["leaked"]:
+        try:
+            rep["lightning"] = check_lightning(cfg, cls)
+        except Exception as e:  # noqa: BLE001 — import/클래스 탐색 실패
+            rep["lightning"] = {"checked": True, "file": cfg["lightning"]["file"], "error": f"{type(e).__name__}: {e}",
+                                "traceback": traceback.format_exc(limit=8)}
+
     if mismatches:
         rep.update(status="fail", failed_stage="shape", error="; ".join(mismatches[:5]))
     elif rep["nan_detected"]:
@@ -247,8 +258,124 @@ def run(cfg: dict) -> dict:
     elif rep["leakage"]["leaked"]:
         rep.update(status="fail", failed_stage="leakage",
                    error=f"future leakage along causal axis (max |Δ|={rep['leakage']['max_abs_diff']:.3g})")
+    elif rep["lightning"].get("error"):
+        rep.update(status="fail", failed_stage="lightning", error=rep["lightning"]["error"],
+                   traceback=rep["lightning"].pop("traceback", None))
+    rep["lightning"].pop("traceback", None)
     rep["duration_s"] = round(time.time() - t_start, 3)
     return rep
+
+
+def _find_lightning_module(cfg: dict):
+    """파일에서 LightningModule 하위 클래스를 찾는다. lightning.pytorch / pytorch_lightning 어느 쪽이든
+    (생성 코드가 고른 패키지와 같은 Trainer를 써야 하므로) 클래스 MRO의 이름으로 판별하고 패키지를 돌려준다."""
+    rel = cfg["lightning"]["file"]
+    path = f"{cfg['workdir']}/{rel}"
+    mod_name = rel[:-3].replace("/", ".")
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    for obj in vars(module).values():
+        if not isinstance(obj, type) or obj.__module__ != mod_name:
+            continue
+        base = next((b for b in obj.__mro__[1:] if b.__name__ == "LightningModule"), None)
+        if base is not None:
+            pkg = importlib.import_module(base.__module__.split(".core")[0])   # lightning.pytorch | pytorch_lightning
+            return obj, pkg
+    raise TypeError(f"no LightningModule subclass defined in {rel}")
+
+
+def _build_lit(lit_cls, model_cls, init_kwargs: dict):
+    """계약: 첫 인자로 모델 인스턴스. 계약 이전 형태(하이퍼파라미터로 스스로 모델 생성)도 받는다.
+    시그니처로 먼저 고른다 — 아무 인자에나 모델 객체를 밀어 넣으면 생성은 되고 엉뚱한 곳에서 터지기 때문."""
+    import inspect
+
+    params = [p for p in inspect.signature(lit_cls.__init__).parameters.values()
+              if p.name != "self" and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+    names = {p.name for p in params}
+    first = params[0] if params else None
+    takes_model = first is not None and (
+        first.name in ("model", "net", "backbone", "module", "network")
+        or (isinstance(first.annotation, type) and issubclass(first.annotation, nn.Module)))
+    order = []
+    if takes_model:
+        order.append(("lit(model)", lambda: lit_cls(model_cls(**init_kwargs))))
+    if init_kwargs and set(init_kwargs) <= names:
+        order.append(("lit(**init_kwargs)", lambda: lit_cls(**init_kwargs)))
+    if all(p.default is not p.empty for p in params):
+        order.append(("lit()", lambda: lit_cls()))
+    if not order:
+        raise TypeError(f"cannot construct LightningModule {lit_cls.__name__}{inspect.signature(lit_cls.__init__)}: "
+                        "first argument should be the model instance (other arguments with defaults)")
+    errors = []
+    for how, make in order:
+        try:
+            torch.manual_seed(0)
+            return make(), how
+        except TypeError as e:
+            errors.append(f"{how}: {e}")
+    raise TypeError("cannot construct LightningModule — " + "; ".join(errors))
+
+
+def _targets(out_spec: List[int], n: int, g: torch.Generator) -> Dict[str, torch.Tensor]:
+    """명세에 target 정의가 없으므로 두 관례를 준비: 회귀(출력과 같은 shape, float) / 분류(마지막 축 = 클래스)."""
+    shape = (n, *out_spec[1:])
+    cands = {"regression": torch.randn(shape, generator=g)}
+    if len(out_spec) >= 2 and out_spec[-1] > 1:
+        cands["classification"] = torch.randint(0, out_spec[-1], shape[:-1], generator=g)
+    return cands
+
+
+def check_lightning(cfg: dict, model_cls) -> dict:
+    """Trainer(fast_dev_run=1)로 실제 학습 경로를 1 step 돌린다. 실패 사유는 batch 형식별로 모아 보고."""
+    res: Dict[str, Any] = {"checked": True, "file": cfg["lightning"]["file"], "lit_class": None, "constructed_by": None,
+                           "batch_format": None, "loss": None, "params_updated": None, "validation_step": None,
+                           "error": None}
+    lit_cls, pl = _find_lightning_module(cfg)
+    res["lit_class"] = lit_cls.__name__
+    from torch.utils.data import DataLoader, TensorDataset
+
+    b = cfg.get("batch_size") or 1
+    g = torch.Generator().manual_seed(0)
+    inputs = _make_inputs([{**s, "shape": [2 * b, *s["shape"][1:]]} for s in cfg["inputs"]], "cpu")
+    out_spec = (cfg.get("output_expected") or [[b]])[0]
+    has_val = lit_cls.validation_step is not pl.LightningModule.validation_step     # 오버라이드했을 때만 val 루프
+    accelerator = {"cuda": "gpu", "mps": "mps"}.get(cfg.get("device", "cpu"), "cpu")
+
+    failures = []
+    for fmt, target in _targets(out_spec, 2 * b, g).items():
+        try:
+            lit, how = _build_lit(lit_cls, model_cls, cfg.get("init_kwargs", {}))
+            before = {n: p.detach().clone() for n, p in lit.named_parameters() if p.requires_grad}
+            losses: List[float] = []
+
+            class _Grab(pl.Callback):
+                def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):
+                    loss = outputs["loss"] if isinstance(outputs, dict) else outputs
+                    if isinstance(loss, torch.Tensor):
+                        losses.append(float(loss.detach().float().mean()) if loss.numel() == 1 else float("nan"))
+
+            data = DataLoader(TensorDataset(*inputs, target), batch_size=b)
+            trainer = pl.Trainer(fast_dev_run=1, accelerator=accelerator, devices=1, logger=False,
+                                 enable_checkpointing=False, enable_progress_bar=False, enable_model_summary=False,
+                                 default_root_dir=cfg["workdir"], callbacks=[_Grab()])
+            trainer.fit(lit, train_dataloaders=data, val_dataloaders=data if has_val else None)
+            if not losses:
+                raise RuntimeError("training_step returned no loss (None / missing 'loss' key) — nothing was optimized")
+            if not all(map(lambda v: v == v and abs(v) != float("inf"), losses)):
+                raise FloatingPointError(f"non-finite or non-scalar training loss: {losses}")
+            updated = any(not torch.equal(before[n], p.detach().cpu()) for n, p in lit.named_parameters() if n in before)
+            res.update(constructed_by=how, batch_format=fmt, loss=losses[0], params_updated=updated,
+                       validation_step="ran" if has_val else "absent")
+            if not updated:
+                res["error"] = "optimizer step did not change any parameter (lr=0? optimizer built on wrong params?)"
+            return res
+        except Exception as e:  # noqa: BLE001 — 형식별 실패를 모아 둘 다 실패하면 보고
+            failures.append(f"[{fmt} batch] {type(e).__name__}: {str(e)[:400]}")
+            res["traceback"] = traceback.format_exc(limit=8)
+    res["error"] = " | ".join(failures)
+    return res
 
 
 if __name__ == "__main__":

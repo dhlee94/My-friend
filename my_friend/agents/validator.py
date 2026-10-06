@@ -18,6 +18,13 @@ def summarize(v: ValidationReport) -> str:
         )
     if v.leakage.checked:
         lines.append(f"leakage probe: {'LEAK' if v.leakage.leaked else 'ok'} (max|Δ|={v.leakage.max_abs_diff:.2e})")
+    lt = v.lightning
+    if lt.checked:
+        if lt.error:
+            lines.append(f"lightning ({lt.file}): ✗ {lt.error[:300]}")
+        else:
+            lines.append(f"lightning {lt.lit_class}: fast_dev_run ok · loss={lt.loss:.4g} · batch={lt.batch_format} "
+                         f"· val_step={lt.validation_step}")
     if v.unused_params:
         lines.append(f"unused params: {', '.join(v.unused_params[:5])}")
     lines += [f"shape ✗ {m}" for m in v.shape_mismatches[:5]]
