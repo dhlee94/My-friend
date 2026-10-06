@@ -39,6 +39,18 @@ def _chain_kind(prev_out: List[str], nxt_in: List[str]) -> str:
     return "conflict"
 
 
+def workflow_mermaid(code: str) -> str:
+    """LangGraph draw_mermaid() 출력을 UI용으로 정리.
+    - <p> 라벨 제거: securityLevel=strict에선 태그가 글자로 보인다.
+    - classDef에 글자색 지정: LangGraph는 밝은 fill만 주므로 dark 테마에서 글자(밝은 기본색)가 배경에 묻힌다.
+    - 투명 노드(__start__)에도 밝은 fill: 상속된 어두운 글자색이 dark 배경에 묻히지 않게.
+    """
+    code = re.sub(r"</?p>", "", code)
+    # default의 글자색은 모든 노드에 상속된다 → 투명 배경(__start__)은 dark 테마에서 어두운 글자가 묻히므로 밝은 fill을 준다
+    code = re.sub(r"^(\s*classDef \S+ )fill-opacity:0\s*$", r"\1fill:#f2f0ff", code, flags=re.M)
+    return re.sub(r"^(\s*classDef \S+ (?!.*color:).*fill:[^\n]*)$", r"\1,color:#1e1b4b", code, flags=re.M)
+
+
 def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) -> str:
     """모듈은 spec.modules 나열 순서(=forward 순서)로 연결한다.
 

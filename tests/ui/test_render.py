@@ -1,5 +1,5 @@
 from my_friend.agents.schemas import ShapeRecord, ValidationReport
-from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md
+from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md, workflow_mermaid
 
 from tests.graph.fixtures import tiny_spec
 
@@ -62,3 +62,15 @@ def test_validation_summary():
     rep.leakage.checked, rep.leakage.leaked = True, True
     md = validation_summary_md(rep)
     assert "FAIL" in md and "`leakage`" in md and "1,234" in md and "🚨 LEAK" in md and "- conv:" in md
+
+
+def test_workflow_mermaid_sets_text_color_for_dark_theme():
+    raw = ("graph TD;\n\t__start__([<p>__start__</p>]):::first\n\trouter(router)\n"
+           "\tclassDef default fill:#f2f0ff,line-height:1.2\n\tclassDef first fill-opacity:0\n"
+           "\tclassDef last fill:#bfb6fc\n\tclassDef mine fill:#fff,color:#000\n")
+    out = workflow_mermaid(raw)
+    assert "<p>" not in out and "__start__([__start__])" in out
+    assert "classDef default fill:#f2f0ff,line-height:1.2,color:#1e1b4b" in out
+    assert "classDef last fill:#bfb6fc,color:#1e1b4b" in out
+    assert "classDef first fill:#f2f0ff,color:#1e1b4b" in out   # 투명 __start__도 밝은 배경 + 어두운 글자
+    assert "classDef mine fill:#fff,color:#000" in out          # 이미 글자색이 있으면 그대로

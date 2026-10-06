@@ -35,7 +35,7 @@ class SentenceTransformerEmbedder:
         batch_size: int = 16,
         query_prefix: str = "",
         doc_prefix: str = "",
-        max_seq_length: Optional[int] = 1024,
+        max_seq_length: Optional[int] = 2048,
     ) -> None:
         from sentence_transformers import SentenceTransformer
 
@@ -44,7 +44,8 @@ class SentenceTransformerEmbedder:
         kwargs = {"torch_dtype": "float16"} if self.device == "cuda" else {}
         self.model = SentenceTransformer(model_name, device=self.device, model_kwargs=kwargs)
         if max_seq_length:
-            # attention O(L²): 청크는 ≤512 토큰 + oversized 일부라 1024로 캡 → 패딩 낭비/메모리 억제
+            # attention O(L²) → 캡으로 패딩 낭비/메모리 억제. 768(tiktoken) 청크는 bge 토큰으로 p95≈1.1k라
+            # 1024 캡이면 7%가 잘린다 → 2048 (잘림은 쪼갤 수 없는 oversized 블록만 남음, 임베딩 시간 +27%)
             self.model.max_seq_length = max_seq_length
         self.batch_size = batch_size
         self.query_prefix, self.doc_prefix = query_prefix, doc_prefix
