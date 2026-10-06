@@ -7,12 +7,20 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Protocol, Tuple, Type, TypeVar
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple, Type, TypeVar
 
 import anthropic
 from pydantic import BaseModel
 
-DEFAULT_MODEL = "claude-opus-5-5"
+# 기본값 = 실측(2026-10, full build ≈ $0.25 / sparring 턴 ≈ $0.07) 기반 권장 구성:
+# 설계·코드·디버깅 노드는 Sonnet 5.5, 분류·검색 계획·요약·쿼리 재작성은 Haiku 4.5.
+# 상한이 아니다 — 허용 목록의 어떤 모델(Opus/Fable 포함)이든 .env로 노드별 지정 가능.
+DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_NODE_MODELS: Dict[str, str] = {
+    "router": "claude-haiku-4-5",
+    "paper_scout": "claude-haiku-4-5",
+    "query_rewriter": "claude-haiku-4-5",
+}
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
@@ -22,19 +30,21 @@ class ModelCaps:
     fallback: bool          # fallbacks="default" 서버측 거절 재시도 지원
     thinking: bool          # thinking={"type": "adaptive"} 지원 (Opus 4.8은 생략 시 thinking 꺼짐 → 명시)
     max_output: int
+    usd_in: float           # $ / 1M input tokens  (캐시 쓰기 1.25x, 캐시 읽기 0.1x)
+    usd_out: float          # $ / 1M output tokens (thinking 포함)
 
 
 # 허용 모델 = structured outputs(output_config.format) 지원 모델. 모든 노드가 구조화 출력에 의존한다.
 # 목록에 없는 모델은 시작 시점에 거부한다 (요청 시점 400보다 빨리, 어떤 설정이 문제인지 명확히).
 MODEL_CAPS: Dict[str, ModelCaps] = {
-    "claude-fable-5-1":  ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000),
-    "claude-fable-5":    ModelCaps(effort=True,  fallback=False, thinking=True,  max_output=128_000),
-    "claude-opus-5-5":   ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000),
-    "claude-opus-5":     ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000),
-    "claude-opus-4-8":   ModelCaps(effort=True,  fallback=False, thinking=True,  max_output=128_000),
-    "claude-sonnet-5-5": ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000),
-    "claude-sonnet-5":   ModelCaps(effort=True,  fallback=False, thinking=True,  max_output=128_000),
-    "claude-haiku-4-5":  ModelCaps(effort=False, fallback=False, thinking=False, max_output=64_000),
+    "claude-fable-5-1":  ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000, usd_in=10.00, usd_out=50.00),
+    "claude-fable-5":    ModelCaps(effort=True,  fallback=False, thinking=True,  max_output=128_000, usd_in=10.00, usd_out=50.00),
+    "claude-opus-5-5":   ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000, usd_in=4.00, usd_out=20.00),
+    "claude-opus-5":     ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000, usd_in=5.00, usd_out=25.00),
+    "claude-opus-4-8":   ModelCaps(effort=True,  fallback=False, thinking=True,  max_output=128_000, usd_in=5.00, usd_out=25.00),
+    "claude-sonnet-5-5": ModelCaps(effort=True,  fallback=True,  thinking=True,  max_output=128_000, usd_in=2.00, usd_out=10.00),
+    "claude-sonnet-5":   ModelCaps(effort=True,  fallback=False, thinking=True,  max_output=128_000, usd_in=2.00, usd_out=10.00),
+    "claude-haiku-4-5":  ModelCaps(effort=False, fallback=False, thinking=False, max_output=64_000, usd_in=1.00, usd_out=5.00),
 }
 
 
@@ -53,13 +63,13 @@ MODEL_NODES: Tuple[str, ...] = (
 
 
 def models_from_env(env: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
-    """노드별 모델: MY_FRIEND_MODEL_<NODE> > MY_FRIEND_MODEL > DEFAULT_MODEL. 허용 목록 밖이면 즉시 실패."""
+    """노드별 모델: MY_FRIEND_MODEL_<NODE> > MY_FRIEND_MODEL(전 노드 일괄) > DEFAULT_NODE_MODELS > DEFAULT_MODEL.
+    허용 목록 밖이면 즉시 실패."""
     env = os.environ if env is None else env
-    default = env.get("MY_FRIEND_MODEL") or DEFAULT_MODEL
     models = {}
     for node in MODEL_NODES:
         var = f"MY_FRIEND_MODEL_{node.upper()}"
-        model = env.get(var) or default
+        model = env.get(var) or env.get("MY_FRIEND_MODEL") or DEFAULT_NODE_MODELS.get(node, DEFAULT_MODEL)
         try:
             model_caps(model)
         except ValueError as e:
@@ -68,6 +78,24 @@ def models_from_env(env: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
     return models
 
 T = TypeVar("T", bound=BaseModel)
+
+
+@dataclass(frozen=True)
+class Usage:
+    """호출 1회의 토큰/비용. label = 출력 스키마 이름(RouteDecision, ModelSpec, ...) → 노드 식별용."""
+
+    model: str
+    label: str
+    input_tokens: int
+    output_tokens: int
+    cache_write_tokens: int
+    cache_read_tokens: int
+    usd: float
+
+
+def usage_cost(caps: ModelCaps, inp: int, out: int, cache_write: int = 0, cache_read: int = 0) -> float:
+    return (inp * caps.usd_in + cache_write * caps.usd_in * 1.25 + cache_read * caps.usd_in * 0.1
+            + out * caps.usd_out) / 1e6
 
 
 class LLMRefusalError(RuntimeError):
@@ -117,6 +145,20 @@ class AnthropicLLM:
         self.effort = effort
         self.max_tokens = max_tokens
         self.client = client or anthropic.Anthropic()
+        self.usage_log: List[Usage] = []     # 호출마다 append (같은 모델 노드끼리 인스턴스 공유 → label로 구분)
+
+    def _record(self, label: str, response: Any) -> None:
+        u = getattr(response, "usage", None)
+        if u is None:
+            return
+        inp, out = u.input_tokens or 0, u.output_tokens or 0
+        cw = getattr(u, "cache_creation_input_tokens", 0) or 0
+        cr = getattr(u, "cache_read_input_tokens", 0) or 0
+        # fallback으로 다른 모델이 응답했으면 그 모델 단가로. response.model은 날짜 스냅샷 ID일 수 있다
+        # (claude-haiku-4-5-20251001) → 허용 목록의 별칭으로 정규화
+        model = _alias(getattr(response, "model", None) or self.model)
+        caps = MODEL_CAPS.get(model, self.caps)
+        self.usage_log.append(Usage(model, label, inp, out, cw, cr, usage_cost(caps, inp, out, cw, cr)))
 
     def request_kwargs(self, system: str, user: str, schema: Dict[str, Any], effort: str, max_tokens: int) -> dict:
         output_config: Dict[str, Any] = {"format": {"type": "json_schema", "schema": schema}}
@@ -139,6 +181,7 @@ class AnthropicLLM:
         response = self.client.beta.messages.create(
             **self.request_kwargs(system, user, schema, self.effort, self.max_tokens)
         )
+        self._record("generate_json", response)
         return json.loads(_final_text(response))
 
     def parse(
@@ -154,7 +197,16 @@ class AnthropicLLM:
         kw = self.request_kwargs(system, user, schema, effort or self.effort, max_tokens or 64000)
         with self.client.beta.messages.stream(**kw) as stream:
             response = stream.get_final_message()
+        self._record(output_model.__name__, response)     # 거절/잘림도 과금되므로 검사 전에 기록
         return output_model.model_validate_json(_final_text(response))
+
+
+def _alias(model: str) -> str:
+    """날짜 스냅샷 ID → MODEL_CAPS 별칭. 가장 긴 접두사 매칭 (claude-opus-5-5-… 가 claude-opus-5 로 잡히지 않게)."""
+    if model in MODEL_CAPS:
+        return model
+    hits = [k for k in MODEL_CAPS if model.startswith(k + "-")]
+    return max(hits, key=len) if hits else model
 
 
 def build_llms(models: Mapping[str, str], client: Optional[anthropic.Anthropic] = None) -> Dict[str, AnthropicLLM]:
