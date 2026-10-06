@@ -1,6 +1,8 @@
 """모델 허용 목록 / 능력별 요청 구성 / 노드별 모델 해석. 실제 API 호출 없음."""
 import pytest
 
+from types import SimpleNamespace
+
 from my_friend.core.llm import MODEL_CAPS, MODEL_NODES, AnthropicLLM, build_llms, models_from_env
 
 SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -36,7 +38,10 @@ def test_unknown_model_rejected():
 
 
 def test_models_from_env_defaults_and_overrides():
-    assert set(models_from_env({}).values()) == {"claude-opus-5-5"}
+    d = models_from_env({})
+    assert {n for n, m in d.items() if m == "claude-haiku-4-5"} == {"router", "paper_scout", "query_rewriter"}
+    assert {m for n, m in d.items() if n not in {"router", "paper_scout", "query_rewriter"}} == {"claude-sonnet-5-5"}
+    assert set(models_from_env({"MY_FRIEND_MODEL": "claude-haiku-4-5"}).values()) == {"claude-haiku-4-5"}  # 일괄 지정
     m = models_from_env({"MY_FRIEND_MODEL": "claude-sonnet-5-5", "MY_FRIEND_MODEL_ROUTER": "claude-haiku-4-5"})
     assert m["router"] == "claude-haiku-4-5"
     assert all(v == "claude-sonnet-5-5" for k, v in m.items() if k != "router")
@@ -55,3 +60,23 @@ def test_build_llms_shares_instances_per_model():
     llms = build_llms(models_from_env({"MY_FRIEND_MODEL_ROUTER": "claude-haiku-4-5"}), client=object())
     assert llms["router"].model == "claude-haiku-4-5"
     assert llms["planner"] is llms["executor"]            # 같은 모델 → 같은 인스턴스
+
+
+def test_usage_recorded_with_responding_model_price():
+    llm = AnthropicLLM(model="claude-sonnet-5-5", client=object())
+    usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=100_000,
+                            cache_creation_input_tokens=0, cache_read_input_tokens=0)
+    llm._record("ModelSpec", SimpleNamespace(usage=usage, model="claude-sonnet-5-5"))
+    llm._record("ModelSpec", SimpleNamespace(usage=usage, model="claude-opus-4-8"))   # fallback 응답
+    assert [round(u.usd, 2) for u in llm.usage_log] == [3.00, 7.50]      # 1M*$2 + 0.1M*$10 / 1M*$5 + 0.1M*$25
+    assert llm.usage_log[0].label == "ModelSpec"
+
+
+def test_usage_normalizes_dated_snapshot_ids():
+    llm = AnthropicLLM(model="claude-haiku-4-5", client=object())
+    usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=0,
+                            cache_creation_input_tokens=0, cache_read_input_tokens=0)
+    llm._record("X", SimpleNamespace(usage=usage, model="claude-haiku-4-5-20251001"))
+    llm._record("X", SimpleNamespace(usage=usage, model="claude-opus-5-5-20260901"))    # opus-5 아님
+    assert [u.model for u in llm.usage_log] == ["claude-haiku-4-5", "claude-opus-5-5"]
+    assert [u.usd for u in llm.usage_log] == [1.0, 4.0]

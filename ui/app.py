@@ -22,6 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv  # noqa: E402 — chainlit 의존성
+
+# chainlit은 cwd(ui/)의 .env만 읽는다 → 저장소 루트 .env도 로드. 이미 설정된 환경 변수(docker env_file 등)가 우선.
+load_dotenv(ROOT / ".env")
+
 import asyncio  # noqa: E402
 
 import chainlit as cl  # noqa: E402
