@@ -1,4 +1,4 @@
-from my_friend.agents.schemas import ShapeRecord, ValidationReport
+from my_friend.agents.schemas import ModuleSpec, ShapeRecord, ValidationReport
 from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md, workflow_mermaid
 
 from tests.graph.fixtures import tiny_spec
@@ -74,3 +74,48 @@ def test_workflow_mermaid_sets_text_color_for_dark_theme():
     assert "classDef last fill:#bfb6fc,color:#1e1b4b" in out
     assert "classDef first fill:#f2f0ff,color:#1e1b4b" in out   # 투명 __start__도 밝은 배경 + 어두운 글자
     assert "classDef mine fill:#fff,color:#000" in out          # 이미 글자색이 있으면 그대로
+
+
+def _layered(n_layers, mlp_out=("B", "T", "D"), odd=None):
+    mods = []
+    for i in range(n_layers):
+        out = ["B", "T", "D*2"] if odd == i else list(mlp_out)
+        mods += [ModuleSpec(path=f"encoder.layers.{i}.attn", role=f"layer {i} self-attention " + "x" * 80,
+                            input_shape=["B", "T", "D"], output_shape=["B", "T", "D"], complexity="O(B·T²·D)"),
+                 ModuleSpec(path=f"encoder.layers.{i}.mlp", role="mlp", input_shape=["B", "T", "D"],
+                            output_shape=out, complexity="O(B·T·D²)")]
+    return tiny_spec(name="Big", modules=mods)
+
+
+def test_repeated_layers_collapse_into_one_block():
+    code = spec_to_mermaid(_layered(16))
+    assert code.count(":::mod") == 2                                  # 32개 모듈 → 대표 2개
+    assert 'encoder.layers.[0‥15].attn ×16' in code and 'encoder.layers.[0‥15].mlp ×16' in code
+    assert "×16 반복" in code                                         # mlp → attn 되돌아가는 반복 엣지
+    assert "x" * 70 not in code and "…" in code                       # 긴 role은 잘림
+
+
+def test_collapse_needs_identical_structure_and_min_repeats():
+    code = spec_to_mermaid(_layered(6, odd=5))                        # layer 5만 mlp 출력이 다름
+    assert "encoder.layers.[0‥4].attn ×5" in code
+    assert "encoder.layers.5.attn" in code and "encoder.layers.5.mlp" in code
+    code = spec_to_mermaid(_layered(2))                               # 2회 반복은 그대로 펼친다
+    assert "‥" not in code and code.count(":::mod") == 4
+
+
+def test_collapsed_node_is_red_if_any_repeat_mismatches():
+    spec = _layered(4)
+    log = [ShapeRecord(module=f"encoder.layers.{i}.{part}", output_shape="2x16x8", expected="2x16x8",
+                       ok=not (i == 2 and part == "attn")) for i in range(4) for part in ("attn", "mlp")]
+    code = spec_to_mermaid(spec, ValidationReport(status="fail", shape_log=log))
+    attn = next(l for l in code.splitlines() if "[0‥3].attn" in l)
+    mlp = next(l for l in code.splitlines() if "[0‥3].mlp" in l)
+    assert attn.endswith(":::bad") and mlp.endswith(":::ok")
+    assert "✗ 불일치: 2" in attn and "불일치" not in mlp
+
+
+def test_repeat_edge_flags_chain_conflict_between_repeats():
+    code = spec_to_mermaid(_layered(3, mlp_out=("B", "T", "D*2")))   # mlp 출력이 다음 반복 attn 입력과 불일치
+    loop = next(l for l in code.splitlines() if "반복" in l)
+    assert "⚠ B×T×D*2 ≠ B×T×D" in loop
+    assert any(l.strip().startswith("linkStyle") for l in code.splitlines())
