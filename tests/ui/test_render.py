@@ -1,4 +1,4 @@
-from my_friend.agents.schemas import ModuleSpec, ShapeRecord, ValidationReport
+from my_friend.agents.schemas import ModuleSpec, ShapeRecord, TensorSpec, ValidationReport
 from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md, workflow_mermaid
 
 from tests.graph.fixtures import tiny_spec
@@ -119,3 +119,46 @@ def test_repeat_edge_flags_chain_conflict_between_repeats():
     loop = next(l for l in code.splitlines() if "반복" in l)
     assert "⚠ B×T×D*2 ≠ B×T×D" in loop
     assert any(l.strip().startswith("linkStyle") for l in code.splitlines())
+
+
+def test_input_and_output_edges_are_chain_checked():
+    spec = tiny_spec()
+    spec.inputs = [TensorSpec(name="x", shape=["B", "T", "D"])]          # proj는 B×T×F를 기대
+    spec.outputs = [TensorSpec(name="y", shape=["B", "T", "2"])]         # head는 B×T×1을 낸다
+    code = spec_to_mermaid(spec)
+    assert 'in_x -->|"⚠ B×T×D ≠ B×T×F"| m_proj' in code
+    assert 'm_head -->|"⚠ B×T×1 ≠ B×T×2"| out_y' in code
+    assert "linkStyle 0 " in code                                       # 입력 엣지가 0번 링크
+    conflicts = chain_conflicts(spec)
+    assert conflicts[0] == "입력 `x` B×T×D ≠ `proj` in B×T×F"
+    assert conflicts[-1] == "`head` out B×T×1 ≠ 출력 `y` B×T×2"
+
+
+def test_input_edge_permute_is_dotted_and_multi_io_left_unchecked():
+    spec = tiny_spec()
+    spec.inputs = [TensorSpec(name="x", shape=["B", "F", "T"])]          # 같은 차원 재배열 → 점선 permute
+    assert 'in_x -.->|"B×F×T → B×T×F (permute)"| m_proj' in spec_to_mermaid(spec)
+    assert not any("입력" in c for c in chain_conflicts(spec))
+    spec.inputs = [TensorSpec(name="x", shape=["B", "T"]), TensorSpec(name="mask", shape=["B", "T"])]
+    code = spec_to_mermaid(spec)                                         # 입력이 둘이면 어느 쪽이 proj로 가는지 모름
+    assert 'in_x -->|"B×T"| m_proj' in code and 'in_mask -->|"B×T"| m_proj' in code and "⚠ B×T ≠" not in code
+    assert not any("입력" in c for c in chain_conflicts(spec))
+
+
+def test_rank_change_is_reshape_only_when_numel_matches():
+    """B=2, T=16, F=3, D=8: rank가 바뀌는 연결은 검증값으로 원소 수를 비교한다."""
+    spec = tiny_spec()
+    spec.inputs = [TensorSpec(name="x", shape=["B", "T"])]               # 32 ≠ proj in B×T×F = 96
+    code = spec_to_mermaid(spec)
+    assert 'in_x -->|"⚠ B×T ≠ B×T×F (원소 수 32 ≠ 96)"| m_proj' in code
+    assert chain_conflicts(spec)[0] == "입력 `x` B×T ≠ `proj` in B×T×F (원소 수 32 ≠ 96)"
+
+    flat = tiny_spec(modules=[
+        ModuleSpec(path="proj", role="p", input_shape=["B", "T", "F"], output_shape=["B", "T", "D"], complexity="-"),
+        ModuleSpec(path="flat", role="f", input_shape=["B", "T*D"], output_shape=["B", "1"], complexity="-"),
+        ModuleSpec(path="odd", role="o", input_shape=["B", "Z", "1"], output_shape=["B", "T", "1"], complexity="-"),
+    ])
+    code = spec_to_mermaid(flat)
+    assert 'm_proj -.->|"B×T×D → B×T*D (reshape)"| m_flat' in code          # 256 = 256 → flatten
+    assert 'm_flat -.->|"B×1 → B×Z×1 (reshape)"| m_odd' in code             # 모르는 기호 Z → 예전처럼 reshape
+    assert chain_conflicts(flat) == []

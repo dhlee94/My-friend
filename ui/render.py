@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from my_friend.agents.schemas import ModelSpec, ValidationReport
+from my_friend.tools.sandbox import resolve_dim
 
 
 def _sid(prefix: str, name: str) -> str:
@@ -28,8 +29,26 @@ def _shape(dims: List[str]) -> str:
     return "×".join(str(d).replace(" ", "") for d in dims)
 
 
-def _chain_kind(prev_out: List[str], nxt_in: List[str]) -> str:
-    """ok | permute (같은 차원의 재배열: transpose/permute) | reshape (원소 수 보존 가능성) | conflict"""
+def _numel(dims: List[str], values: Optional[Dict[str, int]]) -> Optional[int]:
+    """명세 검증값으로 원소 수 계산. 값이 없거나 모르는 기호면 None."""
+    if not values:
+        return None
+    n = 1
+    try:
+        for d in dims:
+            n *= resolve_dim(str(d), values)
+    except (ValueError, SyntaxError, ZeroDivisionError):
+        return None
+    return n
+
+
+def _chain_kind(prev_out: List[str], nxt_in: List[str], values: Optional[Dict[str, int]] = None) -> str:
+    """ok | permute (같은 차원의 재배열: transpose/permute) | reshape (원소 수 보존) | conflict
+
+    rank가 바뀌는 연결은 명세 검증값(values)으로 원소 수를 비교한다: 같으면 flatten/view(reshape),
+    다르면 conflict. 값을 못 구하면 예전처럼 배치 축 유지 + rank 변화를 reshape로 간주한다.
+    rank가 같은데 차원이 다르면 원소 수가 우연히 같아도(작은 검증값) conflict로 둔다.
+    """
     a = [str(x).replace(" ", "") for x in prev_out]
     b = [str(x).replace(" ", "") for x in nxt_in]
     if a == b:
@@ -37,8 +56,19 @@ def _chain_kind(prev_out: List[str], nxt_in: List[str]) -> str:
     if Counter(a) == Counter(b):
         return "permute"
     if a and b and a[0] == b[0] and len(a) != len(b):
-        return "reshape"            # 배치 축 유지 + rank 변화 → flatten/view 계열로 간주
+        na, nb = _numel(a, values), _numel(b, values)
+        if na is not None and nb is not None and na != nb:
+            return "conflict"
+        return "reshape"
     return "conflict"
+
+
+def _numel_note(a: List[str], b: List[str], values: Optional[Dict[str, int]]) -> str:
+    """rank가 다른 conflict에 원소 수를 덧붙여 왜 reshape가 아닌지 보인다."""
+    if len(a) == len(b):
+        return ""
+    na, nb = _numel(a, values), _numel(b, values)
+    return f" (원소 수 {na} ≠ {nb})" if na is not None and nb is not None and na != nb else ""
 
 
 def workflow_mermaid(code: str) -> str:
@@ -201,37 +231,43 @@ def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) 
         lines.append(f'  {_sid("out", t.name)}[/"{_q(t.name)}<br>{_q(_shape(t.shape))}"/]:::io')
 
     # ---- edges
+    values = spec.dim_values()
     link_idx = 0
     styles: List[str] = []
 
-    def edge(prev: _Node, nxt: _Node, extra: str = "") -> None:
+    def edge(src: str, out_dims: List[str], dst: str, in_dims: List[str], extra: str = "") -> None:
         nonlocal link_idx
-        kind = _chain_kind(prev.output_shape, nxt.input_shape)
-        a, b = _shape(prev.output_shape), _shape(nxt.input_shape)
-        src, dst = prev.node_id, nxt.node_id
+        kind = _chain_kind(out_dims, in_dims, values)
+        a, b = _shape(out_dims), _shape(in_dims)
         if kind == "ok":
             lines.append(f'  {src} -->|"{_q(a)}{extra}"| {dst}')
         elif kind in ("permute", "reshape"):
             lines.append(f'  {src} -.->|"{_q(a)} → {_q(b)} ({kind}){extra}"| {dst}')
         else:
-            lines.append(f'  {src} -->|"⚠ {_q(a)} ≠ {_q(b)}{extra}"| {dst}')
+            lines.append(f'  {src} -->|"⚠ {_q(a)} ≠ {_q(b)}{_numel_note(out_dims, in_dims, values)}{extra}"| {dst}')
             styles.append(f"  linkStyle {link_idx} stroke:#dc2626,stroke-width:2px,color:#dc2626")
         link_idx += 1
 
     if nodes:
-        first = nodes[0]
+        first, last = nodes[0], nodes[-1]
         for t in spec.inputs:
-            lines.append(f'  {_sid("in", t.name)} -->|"{_q(_shape(t.shape))}"| {first.node_id}')
-            link_idx += 1
+            if len(spec.inputs) == 1:      # 입력이 하나면 첫 모듈 입력과 체인 검사 (여럿이면 어느 것이 들어가는지 명세에 없음)
+                edge(_sid("in", t.name), t.shape, first.node_id, first.input_shape)
+            else:
+                lines.append(f'  {_sid("in", t.name)} -->|"{_q(_shape(t.shape))}"| {first.node_id}')
+                link_idx += 1
         for prev, nxt in zip(nodes, nodes[1:]):
-            edge(prev, nxt)
+            edge(prev.node_id, prev.output_shape, nxt.node_id, nxt.input_shape)
         for group, repeat in layout:
             if repeat > 1:                 # 반복 블록: 마지막 → 첫 노드로 되돌아가는 엣지 (반복 사이 shape 체인도 검사)
-                edge(group[-1], group[0], extra=f" · ×{repeat} 반복")
-        last = nodes[-1]
+                edge(group[-1].node_id, group[-1].output_shape, group[0].node_id, group[0].input_shape,
+                     extra=f" · ×{repeat} 반복")
         for t in spec.outputs:
-            lines.append(f'  {last.node_id} -->|"{_q(_shape(last.output_shape))}"| {_sid("out", t.name)}')
-            link_idx += 1
+            if len(spec.outputs) == 1:
+                edge(last.node_id, last.output_shape, _sid("out", t.name), t.shape)
+            else:
+                lines.append(f'  {last.node_id} -->|"{_q(_shape(last.output_shape))}"| {_sid("out", t.name)}')
+                link_idx += 1
     else:
         for i_t in spec.inputs:
             for o_t in spec.outputs:
@@ -240,11 +276,23 @@ def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) 
 
 
 def chain_conflicts(spec: ModelSpec) -> List[str]:
-    """승인 전에 사용자에게 보여줄 정적 shape 충돌 목록."""
+    """승인 전에 사용자에게 보여줄 정적 shape 충돌 목록.
+    입력/출력 텐서가 하나뿐이면 입력 → 첫 모듈, 마지막 모듈 → 출력 연결도 검사한다."""
     out = []
-    for prev, nxt in zip(spec.modules, spec.modules[1:]):
-        if _chain_kind(prev.output_shape, nxt.input_shape) == "conflict":
-            out.append(f"`{prev.path}` out {_shape(prev.output_shape)} ≠ `{nxt.path}` in {_shape(nxt.input_shape)}")
+    mods, values = spec.modules, spec.dim_values()
+
+    def check(a: List[str], b: List[str], left: str, right: str) -> None:
+        if _chain_kind(a, b, values) == "conflict":
+            out.append(f"{left} {_shape(a)} ≠ {right} {_shape(b)}{_numel_note(a, b, values)}")
+
+    if mods and len(spec.inputs) == 1:
+        t, first = spec.inputs[0], mods[0]
+        check(t.shape, first.input_shape, f"입력 `{t.name}`", f"`{first.path}` in")
+    for prev, nxt in zip(mods, mods[1:]):
+        check(prev.output_shape, nxt.input_shape, f"`{prev.path}` out", f"`{nxt.path}` in")
+    if mods and len(spec.outputs) == 1:
+        last, t = mods[-1], spec.outputs[0]
+        check(last.output_shape, t.shape, f"`{last.path}` out", f"출력 `{t.name}`")
     return out
 
 
