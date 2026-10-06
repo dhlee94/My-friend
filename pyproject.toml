@@ -18,7 +18,7 @@ dependencies = [
 # torch는 플랫폼별 인덱스가 달라서 extras로 분리 (mps: PyPI 기본 휠, cuda: 서버 Dockerfile에서 cu 인덱스 지정)
 embed = ["sentence-transformers>=3.0", "torch>=2.3"]
 # validator 샌드박스가 생성 코드를 실행하는 인터프리터에 필요
-train = ["torch>=2.3", "lightning>=2.3"]
+train = ["torch>=2.3", "lightning>=2.3", "pytest>=8"]
 # Chainlit UI: Python >= 3.11 필요 (LangGraph interrupt in async + sync nodes)
 ui = ["chainlit>=2.12,<3"]
 dev = ["pytest>=8"]

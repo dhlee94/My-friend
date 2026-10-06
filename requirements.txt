@@ -26,3 +26,4 @@ sentence-transformers>=6.1,<7
 # --- model code runtime (validator 샌드박스가 생성 코드를 실행)
 torch>=2.14,<3
 lightning>=2.6,<3
+pytest>=8,<10           # 생성된 test_*.py 실행

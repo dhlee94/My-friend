@@ -170,4 +170,8 @@ def validation_summary_md(v: ValidationReport) -> str:
         lines.append("**Unused params:** " + ", ".join(f"`{p}`" for p in v.unused_params[:8]))
     if v.shape_mismatches:
         lines.append("**Shape mismatches:**\n" + "\n".join(f"- {m}" for m in v.shape_mismatches[:10]))
+    if v.tests_status == "fail":
+        lines.append("**Generated tests:** ❌ fail\n```\n" + v.tests_detail[-1500:] + "\n```")
+    elif v.tests_status:
+        lines.append(f"**Generated tests:** {'✅' if v.tests_status == 'pass' else '⏭'} {v.tests_status} — {v.tests_detail}")
     return "\n\n".join(lines)

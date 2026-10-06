@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from my_friend.graph.state import GraphState
 from my_friend.tools.code_patch import PatchError, extract_symbol, outline, replace_symbol
@@ -9,6 +9,13 @@ from . import prompts
 from .base import AgentDeps, assistant_turn, compose, render_files, render_history, render_spec, section
 from .schemas import CodeBundle, PatchSet
 
+
+
+def python_only(files: Dict[str, str]) -> Tuple[Dict[str, str], List[str]]:
+    """생성물은 .py만 세션에 남긴다. README/notes 같은 문서는 검증되지 않고 이후 모든 프롬프트 토큰만 늘린다
+    (설명은 CodeBundle.notes / PatchSet.notes로)."""
+    kept = {p: src for p, src in files.items() if p.endswith(".py")}
+    return kept, sorted(p for p in files if p not in kept)
 
 class Executor:
     """Full build: 승인된 ModelSpec → model.py + lit_module.py 전체 생성."""
@@ -28,7 +35,9 @@ class Executor:
             effort=self.deps.effort["executor"],
             max_tokens=64000,
         )
-        new_files = {f.path: f.content for f in bundle.files}
+        new_files, dropped = python_only({f.path: f.content for f in bundle.files})
+        if dropped:
+            bundle.notes += f"\n(.py 외 파일 제외: {', '.join(dropped)})"
         entry = bundle.entry_file
         if entry not in new_files:
             # 계약 위반이지만 그래프를 죽이지 않는다: validator의 import 단계 실패 → reflector가 수습
@@ -92,7 +101,7 @@ class PartialExecutor:
             effort=self.deps.effort["partial_executor"], max_tokens=32000,
         )
 
-        changed: Dict[str, str] = {f.path: f.content for f in patchset.new_files}
+        changed, dropped = python_only({f.path: f.content for f in patchset.new_files})
         applied, failed = [], []
         for p in patchset.patches:
             src = changed.get(p.file, files.get(p.file, ""))
@@ -102,6 +111,8 @@ class PartialExecutor:
             except (PatchError, SyntaxError) as e:
                 failed.append(f"{p.file}:{p.symbol} — {e}")
         msg = f"{patchset.notes}\n적용: {', '.join(applied) or '-'}"
+        if dropped:
+            msg += f"\n(.py 외 파일 제외: {', '.join(dropped)})"
         if failed:
             msg += "\n실패: " + "; ".join(failed)
         return {"files": changed, "messages": [assistant_turn("partial_executor", msg)]}

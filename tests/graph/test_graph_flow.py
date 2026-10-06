@@ -145,6 +145,29 @@ def test_full_build_reflector_patches_leak_then_accepts():
     assert '<symbol name="TinyTS.forward" file="model.py">' in pe_prompt and "centered" in pe_prompt
 
 
+def test_executor_keeps_only_python_and_runs_generated_tests():
+    test_src = ("import torch\nfrom model import TinyTS\n\n\ndef test_shape():\n"
+                "    assert TinyTS(3, 8, 3)(torch.randn(2, 16, 3)).shape == (2, 16, 1)\n")
+    llm, s = make({
+        **scout_plans(),
+        RouteDecision: [RouteDecision(mode="full_build", reason="new")],
+        type(tiny_spec()): [tiny_spec()],
+        CodeBundle: [CodeBundle(files=[CodeFile(path="model.py", content=model_source(CAUSAL_FORWARD)),
+                                       CodeFile(path="test_model.py", content=test_src),
+                                       CodeFile(path="README.md", content="# docs"),
+                                       CodeFile(path="notes.md", content="notes")],
+                                entry_file="model.py", notes="built")],
+        Reflection: [Reflection(diagnosis="ok", risks=[], action="accept", change=None)],
+    })
+    s.send("모델 만들어줘")
+    r = s.resume("approve")
+    assert set(r.state["files"]) == {"model.py", "test_model.py"}
+    executor_msg = next(m["content"] for m in r.new_messages if m["name"] == "executor")
+    assert "README.md" in executor_msg and "제외" in executor_msg
+    assert r.state["validation"].tests_status == "pass"
+    assert "generated tests: pass" in next(m["content"] for m in r.new_messages if m["name"] == "validator")
+
+
 def test_reflector_iteration_budget_stops_loop():
     bad_patch = PatchSet(patches=[SymbolPatch(file="model.py", symbol="TinyTS.forward", new_source=LEAKY_FORWARD)],
                          new_files=[], notes="no-op")
