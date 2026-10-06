@@ -7,6 +7,7 @@ config contextvar가 전파되지 않아 interrupt()가 "Called get_config outsi
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
@@ -28,7 +29,7 @@ from chainlit.input_widget import Select, Slider  # noqa: E402
 
 from my_friend.agents.base import AgentDeps  # noqa: E402
 from my_friend.agents.planner import render_spec_md  # noqa: E402
-from my_friend.core.llm import DEFAULT_MODEL, AnthropicLLM  # noqa: E402
+from my_friend.core.llm import build_llms, models_from_env  # noqa: E402
 from my_friend.graph.builder import build_graph, make_async_checkpointer  # noqa: E402
 from my_friend.tools.arxiv import ArxivClient  # noqa: E402
 from my_friend.tools.sandbox import SubprocessSandbox  # noqa: E402
@@ -37,6 +38,10 @@ from ui.runner import GraphRunner  # noqa: E402
 
 REVIEW_TIMEOUT_S = int(os.environ.get("REVIEW_TIMEOUT_S", "3600"))
 CHECKPOINT_DB = os.environ.get("CHECKPOINT_DB", str(ROOT / "data" / "checkpoints.sqlite"))
+# 노드별 모델은 import 시점에 검증: 허용 목록 밖 모델이면 첫 채팅이 아니라 서버 기동에서 실패한다
+MODELS = models_from_env()
+
+log = logging.getLogger(__name__)
 
 NODE_LABEL = {
     "router": "🧭 Router",
@@ -58,6 +63,8 @@ _graph_lock = asyncio.Lock()
 
 
 def _build_graph(checkpointer):
+    llms = build_llms(MODELS)
+    log.info("node models: %s", ", ".join(f"{n}={m}" for n, m in MODELS.items()))
     retriever = None
     index_dir = os.environ.get("RAG_INDEX_DIR")
     if index_dir and (Path(index_dir) / "manifest.json").exists():
@@ -69,10 +76,11 @@ def _build_graph(checkpointer):
 
         index = HybridIndex.load(index_dir)
         retriever = HybridRetriever(
-            index, SentenceTransformerEmbedder(index.embedder_name), QueryRewriter(AnthropicLLM(effort="low"))
+            index, SentenceTransformerEmbedder(index.embedder_name), QueryRewriter(llms["query_rewriter"])
         )
     deps = AgentDeps(
-        llm=AnthropicLLM(model=os.environ.get("MY_FRIEND_MODEL", DEFAULT_MODEL)),
+        llm=llms["planner"],
+        llms=llms,
         sandbox=SubprocessSandbox(
             device=os.environ.get("SANDBOX_DEVICE", "cpu"),
             timeout_s=float(os.environ.get("SANDBOX_TIMEOUT_S", "120")),

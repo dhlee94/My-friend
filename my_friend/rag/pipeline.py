@@ -75,9 +75,9 @@ def _main(argv: Optional[List[str]] = None) -> None:
     index = HybridIndex.load(args.index)
     rewriter = None
     if not args.no_rewrite:
-        from my_friend.core.llm import AnthropicLLM
+        from my_friend.core.llm import AnthropicLLM, models_from_env
 
-        rewriter = QueryRewriter(AnthropicLLM())
+        rewriter = QueryRewriter(AnthropicLLM(model=models_from_env()["query_rewriter"]))
     retriever = HybridRetriever(index, SentenceTransformerEmbedder(index.embedder_name), rewriter)
     flt = SearchFilter(section_types=frozenset({args.section})) if args.section else None
     res = retriever.retrieve(args.query, top_k=args.top_k, flt=flt)

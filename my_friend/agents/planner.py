@@ -37,7 +37,7 @@ class Planner:
         refs = ""
         if self.deps.retriever is not None:
             refs = self.deps.retriever.retrieve(state["request"], top_k=self.rag_top_k).to_context()
-        spec = self.deps.llm.parse(
+        spec = self.deps.llm_for("planner").parse(
             prompts.PLANNER,
             compose(
                 section("scout_digest", render_scout(state)),

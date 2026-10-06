@@ -20,7 +20,7 @@ class Reflector:
 
     def __call__(self, state: GraphState) -> dict:
         it, max_it = state.get("iteration", 0), state.get("max_iterations", 3)
-        refl = self.deps.llm.parse(
+        refl = self.deps.llm_for("reflector").parse(
             prompts.REFLECTOR,
             compose(
                 section("validation_report", render_validation(state)),

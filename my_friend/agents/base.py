@@ -28,13 +28,17 @@ DEFAULT_EFFORT: Dict[str, str] = {
 
 @dataclass
 class AgentDeps:
-    llm: StructuredLLM
+    llm: StructuredLLM                    # 기본 LLM (llms에 없는 노드가 사용)
     sandbox: Sandbox = field(default_factory=SubprocessSandbox)
     arxiv: Optional[ArxivSearcher] = None
     retriever: Optional["HybridRetriever"] = None
     effort: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_EFFORT))
     history_turns: int = 12               # 프롬프트에 넣을 최근 대화 턴 수
     max_file_chars: int = 40_000          # 파일 하나를 통째로 넣을 상한
+    llms: Dict[str, StructuredLLM] = field(default_factory=dict)   # 노드별 LLM (모델이 다를 때)
+
+    def llm_for(self, node: str) -> StructuredLLM:
+        return self.llms.get(node, self.llm)
 
 
 def section(tag: str, body: str) -> str:

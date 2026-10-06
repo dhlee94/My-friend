@@ -28,7 +28,7 @@ class SparringPartner:
         self.deps = deps
 
     def __call__(self, state: GraphState) -> dict:
-        turn = self.deps.llm.parse(
+        turn = self.deps.llm_for("sparring_partner").parse(
             prompts.SPARRING,
             compose(
                 section("scout_digest", render_scout(state)),
