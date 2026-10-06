@@ -158,7 +158,8 @@ class HybridIndex:
         ]
 
     # ---------------------------------------------------------------- persist
-    def save(self, path: str | Path) -> None:
+    def save(self, path: str | Path, sources: Optional[Dict[str, str]] = None) -> None:
+        """sources: doc_id → 원본 파일 sha256 (pipeline sync가 추가/수정/삭제를 판별하는 데 쓴다)."""
         p = Path(path)
         p.mkdir(parents=True, exist_ok=True)
         with open(p / "chunks.jsonl", "w", encoding="utf-8") as f:
@@ -174,6 +175,7 @@ class HybridIndex:
             "n_chunks": len(self.chunks),
             "analyzer": {"encoding": self.analyzer._encoding, "subword_min_len": self.analyzer.subword_min_len,
                          "use_subwords": self.analyzer.use_subwords},
+            "sources": sources or {},
         }
         (p / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -192,6 +194,12 @@ class HybridIndex:
         embeddings = np.load(p / "embeddings.npy", mmap_mode="r")
         analyzer = EnglishAnalyzer(**manifest["analyzer"])
         return cls(chunks, bm25, np.asarray(embeddings), analyzer, manifest["embedder"])
+
+
+def read_sources(path: str | Path) -> Dict[str, str]:
+    """기존 인덱스의 doc_id → 원본 sha256. 인덱스가 없거나 sources 이전 형식이면 {}."""
+    m = Path(path) / "manifest.json"
+    return json.loads(m.read_text()).get("sources", {}) if m.exists() else {}
 
 
 def _ranks(scores: np.ndarray, k: int, positive_only: bool) -> np.ndarray:

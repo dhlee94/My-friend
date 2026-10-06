@@ -50,6 +50,11 @@ class SentenceTransformerEmbedder:
         self.batch_size = batch_size
         self.query_prefix, self.doc_prefix = query_prefix, doc_prefix
 
+    @property
+    def cache_fingerprint(self) -> str:
+        """임베딩 캐시 키에 들어가는 값: 같은 텍스트라도 이 중 하나가 바뀌면 벡터가 달라진다."""
+        return f"{self.name}|max_seq_length={self.model.max_seq_length}|doc_prefix={self.doc_prefix!r}"
+
     def _encode(self, texts: List[str]) -> np.ndarray:
         emb = self.model.encode(
             texts, batch_size=self.batch_size, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=len(texts) > 256
