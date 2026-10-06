@@ -12,8 +12,15 @@ from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple, Type, Ty
 import anthropic
 from pydantic import BaseModel
 
-# 프로젝트 기본값. 비용을 낮추려면 코드가 아니라 각자의 .env에서 노드별로 내린다 (.env.example 예산 프리셋 참고).
-DEFAULT_MODEL = "claude-opus-5-5"
+# 기본값 = 실측(2026-10, full build ≈ $0.25 / sparring 턴 ≈ $0.07) 기반 권장 구성:
+# 설계·코드·디버깅 노드는 Sonnet 5.5, 분류·검색 계획·요약·쿼리 재작성은 Haiku 4.5.
+# 상한이 아니다 — 허용 목록의 어떤 모델(Opus/Fable 포함)이든 .env로 노드별 지정 가능.
+DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_NODE_MODELS: Dict[str, str] = {
+    "router": "claude-haiku-4-5",
+    "paper_scout": "claude-haiku-4-5",
+    "query_rewriter": "claude-haiku-4-5",
+}
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
@@ -56,12 +63,13 @@ MODEL_NODES: Tuple[str, ...] = (
 
 
 def models_from_env(env: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
-    """노드별 모델: MY_FRIEND_MODEL_<NODE> > MY_FRIEND_MODEL(전 노드 일괄) > DEFAULT_MODEL. 허용 목록 밖이면 즉시 실패."""
+    """노드별 모델: MY_FRIEND_MODEL_<NODE> > MY_FRIEND_MODEL(전 노드 일괄) > DEFAULT_NODE_MODELS > DEFAULT_MODEL.
+    허용 목록 밖이면 즉시 실패."""
     env = os.environ if env is None else env
     models = {}
     for node in MODEL_NODES:
         var = f"MY_FRIEND_MODEL_{node.upper()}"
-        model = env.get(var) or env.get("MY_FRIEND_MODEL") or DEFAULT_MODEL
+        model = env.get(var) or env.get("MY_FRIEND_MODEL") or DEFAULT_NODE_MODELS.get(node, DEFAULT_MODEL)
         try:
             model_caps(model)
         except ValueError as e:

@@ -38,7 +38,11 @@ def test_unknown_model_rejected():
 
 
 def test_models_from_env_defaults_and_overrides():
-    assert set(models_from_env({}).values()) == {"claude-opus-5-5"}
+    d = models_from_env({})
+    light = {"router", "paper_scout", "query_rewriter"}
+    assert {d[n] for n in light} == {"claude-haiku-4-5"}
+    assert {m for n, m in d.items() if n not in light} == {"claude-sonnet-5-5"}
+    assert set(models_from_env({"MY_FRIEND_MODEL": "claude-opus-5-5"}).values()) == {"claude-opus-5-5"}  # 일괄 지정
     assert set(models_from_env({"MY_FRIEND_MODEL": "claude-haiku-4-5"}).values()) == {"claude-haiku-4-5"}  # 일괄 지정
     m = models_from_env({"MY_FRIEND_MODEL": "claude-sonnet-5-5", "MY_FRIEND_MODEL_ROUTER": "claude-haiku-4-5"})
     assert m["router"] == "claude-haiku-4-5"
