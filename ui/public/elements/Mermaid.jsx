@@ -49,7 +49,11 @@ export default function Mermaid() {
       .then(async (mermaid) => {
         const dark = document.documentElement.classList.contains("dark");
         // strict: 라벨의 HTML/스크립트 이스케이프 (라벨은 LLM 생성 텍스트)
-        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" });
+        // wrappingWidth: 기본 200px은 role 라벨을 좁고 긴 노드로 접는다 → 넓혀서 세로 길이를 줄인다
+        mermaid.initialize({
+          startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default",
+          flowchart: { wrappingWidth: 320 },
+        });
         const id = "mf-mmd-" + Math.random().toString(36).slice(2);
         const { svg } = await mermaid.render(id, props.code);
         if (!cancelled && ref.current) ref.current.innerHTML = svg;
