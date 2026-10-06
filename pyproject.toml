@@ -2,26 +2,28 @@
 name = "my-friend"
 version = "0.1.0"
 description = "LangGraph-based AI pair-programming partner for implementing ML papers in PyTorch"
-requires-python = ">=3.9"
+# 3.11+: 3.10 이하에서는 async 실행(astream) 중 스레드풀로 넘어간 동기 노드에 LangGraph config contextvar가
+# 전파되지 않아 interrupt()가 실패한다 (#9). 하한은 requirements.txt와 같은 검증 버전.
+requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.26",
-    "tiktoken>=0.7",
-    "nltk>=3.8",
-    "anthropic>=0.125",
-    "pydantic>=2.7",
+    "numpy>=2.0,<3",
+    "tiktoken>=0.14,<1",
+    "nltk>=3.10,<4",
+    "anthropic>=1.11,<2",
+    "pydantic>=2.7,<3",
     "typing_extensions>=4.12",
-    "langgraph>=0.6",
-    "langgraph-checkpoint-sqlite>=2.0",
+    "langgraph>=1.2,<2",
+    "langgraph-checkpoint>=4.2,<5",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
 ]
 
 [project.optional-dependencies]
 # torch는 플랫폼별 인덱스가 달라서 extras로 분리 (mps: PyPI 기본 휠, cuda: 서버 Dockerfile에서 cu 인덱스 지정)
-embed = ["sentence-transformers>=3.0", "torch>=2.3"]
+embed = ["sentence-transformers>=6.1,<7", "torch>=2.14,<3"]
 # validator 샌드박스가 생성 코드를 실행하는 인터프리터에 필요
-train = ["torch>=2.3", "lightning>=2.3", "pytest>=8"]
-# Chainlit UI: Python >= 3.11 필요 (LangGraph interrupt in async + sync nodes)
+train = ["torch>=2.14,<3", "lightning>=2.6,<3", "pytest>=8,<10"]
 ui = ["chainlit>=2.12,<3"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8,<10"]
 
 [build-system]
 requires = ["hatchling"]

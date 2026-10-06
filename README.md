@@ -4,7 +4,7 @@
 
 ## 로컬 실행 (Mac, MPS — 권장)
 
-Python ≥ 3.11 필요 (시스템 Python 3.9에서는 UI가 동작하지 않음).
+Python ≥ 3.11 필요 (`requires-python`). 3.10 이하는 설치되지 않습니다: async 실행 중 LangGraph `interrupt()`가 동작하지 않기 때문입니다.
 
 ```bash
 uv venv --python 3.11 && source .venv/bin/activate

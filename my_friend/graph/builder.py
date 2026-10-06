@@ -38,17 +38,12 @@ def _serde():
     """상태에 담기는 pydantic 타입을 msgpack 역직렬화 allowlist에 명시 등록한 serializer.
 
     langgraph-checkpoint ≥ 4 는 미등록 타입 역직렬화를 경고하고 향후 차단한다(임의 클래스 로딩 방어).
-    구버전(≤ 2.x, Python 3.9 환경)은 해당 인자가 없으므로 None(기본 serializer)을 돌려준다.
     """
-    import inspect
-
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
     from pydantic import BaseModel
 
     from my_friend.agents import schemas
 
-    if "allowed_msgpack_modules" not in inspect.signature(JsonPlusSerializer.__init__).parameters:
-        return None
     allow = tuple(
         (obj.__module__, obj.__name__)
         for obj in vars(schemas).values()

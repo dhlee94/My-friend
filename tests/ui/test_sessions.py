@@ -1,10 +1,8 @@
 """세션 목록/복원 (#11): 체크포인트만으로 스레드를 찾고, 승인 대기 세션을 이어서 실행한다."""
 import asyncio
-import sys
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.version_info < (3, 11), reason="interrupt() in async+sync nodes needs Python >= 3.11")
 pytest.importorskip("torch")
 
 from my_friend.graph.builder import make_async_checkpointer, make_checkpointer  # noqa: E402

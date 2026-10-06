@@ -1,11 +1,9 @@
 """GraphRunner async 흐름: 실제 그래프(scripted LLM + subprocess 샌드박스)를 astream으로 구동."""
 import asyncio
-import sys
 from collections import deque
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.version_info < (3, 11), reason="interrupt() in async+sync nodes needs Python >= 3.11")
 pytest.importorskip("torch")
 
 from my_friend.agents.base import AgentDeps  # noqa: E402
