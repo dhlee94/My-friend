@@ -39,6 +39,7 @@ from my_friend.tools.arxiv import ArxivClient  # noqa: E402
 from my_friend.tools.sandbox import SubprocessSandbox  # noqa: E402
 from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md, workflow_mermaid  # noqa: E402
 from ui.runner import GraphRunner  # noqa: E402
+from ui.sessions import recent_sessions  # noqa: E402
 
 REVIEW_TIMEOUT_S = int(os.environ.get("REVIEW_TIMEOUT_S", "3600"))
 CHECKPOINT_DB = os.environ.get("CHECKPOINT_DB", str(ROOT / "data" / "checkpoints.sqlite"))
@@ -222,11 +223,57 @@ class ChainlitPresenter:
         await cl.Message(author="my-friend", content=text).send()
 
 
+# ------------------------------------------------------------------- session restore
+async def _replay_session(state: Dict[str, Any]) -> None:
+    """체크포인트 state만으로 대화와 현재 산출물(명세 다이어그램·검증 색칠·파일)을 다시 그린다 (#11).
+    Chainlit data layer를 쓰지 않으므로 화면 복원의 원천은 체크포인트 하나다."""
+    for m in state.get("messages") or []:
+        if m.get("role") == "user":
+            await cl.Message(content=m["content"], type="user_message").send()
+        else:
+            await cl.Message(author=NODE_LABEL.get(m["name"], m["name"]), content=m["content"]).send()
+
+    spec, v = state.get("spec"), state.get("validation")
+    files = {p: s for p, s in (state.get("files") or {}).items() if s}
+    elements: list = []
+    lines = ["📌 **복원된 세션 상태**"]
+    if spec is not None:
+        colored = v if v is not None and v.shape_log else None
+        elements.append(cl.CustomElement(
+            name="Mermaid", display="inline",
+            props={"code": spec_to_mermaid(spec, colored),
+                   "title": f"{spec.name} — " + ("실측 shape 검증" if colored else "forward shape flow")},
+        ))
+        lines.append(f"명세: `{spec.name}`")
+    if v is not None:
+        lines.append(f"마지막 검증: {v.status}" + (f" @ `{v.failed_stage}`" if v.failed_stage else ""))
+    if files:
+        elements += [cl.Text(name=p, content=s, language="python" if p.endswith(".py") else None, display="side")
+                     for p, s in files.items()]
+        lines.append("📄 " + " ".join(files))       # side 엘리먼트는 content에 이름이 있어야 링크가 된다
+    if len(lines) > 1:
+        await cl.Message(author="my-friend", content="\n".join(lines), elements=elements).send()
+
+
+@cl.action_callback("resume_session")
+async def on_resume_session(action: cl.Action) -> None:
+    current: GraphRunner = cl.user_session.get("runner")
+    if current is not None and current.lock.locked():
+        await cl.Message(author="my-friend", content="이전 요청을 처리 중입니다. 완료 후 다시 시도해주세요.").send()
+        return
+    listing: Optional[cl.Message] = cl.user_session.get("session_list")
+    if listing is not None:
+        await listing.remove_actions()
+    runner = GraphRunner(await get_graph(), thread_id=action.payload["thread_id"])
+    cl.user_session.set("runner", runner)       # 이후 입력은 복원된 스레드로 이어진다
+    await _replay_session(await runner.state())
+    await runner.resume_pending(ChainlitPresenter())
+
+
 # ------------------------------------------------------------------------ handlers
 @cl.on_chat_start
 async def on_chat_start() -> None:
     graph = await get_graph()
-    # Chainlit thread id와 일치시켜 둔다: data layer를 붙이면 on_chat_resume에서 같은 체크포인트를 이어받는다
     runner = GraphRunner(graph, thread_id=cl.context.session.thread_id or uuid.uuid4().hex)
     cl.user_session.set("runner", runner)
     cl.user_session.set("settings", {"mode": "auto", "max_iterations": 3})
@@ -244,6 +291,16 @@ async def on_chat_start() -> None:
                 "새 모델 설계는 **Full-Build** 모드로 진행됩니다. 실패한 실행은 `/retry`로 재시도합니다.",
         elements=[workflow],
     ).send()
+    sessions = await recent_sessions(graph, exclude=runner.config["configurable"]["thread_id"])
+    if sessions:
+        listing = cl.Message(
+            author="my-friend",
+            content="**최근 세션** — 누르면 체크포인트에서 대화를 복원해 이어갑니다. (⏸ = 승인 대기 중)",
+            actions=[cl.Action(name="resume_session", payload={"thread_id": s.thread_id}, label="↩ " + s.label)
+                     for s in sessions],
+        )
+        await listing.send()
+        cl.user_session.set("session_list", listing)
 
 
 @cl.on_settings_update

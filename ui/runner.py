@@ -68,6 +68,21 @@ class GraphRunner:
                     payload["max_iterations"] = max_iterations
             await self._drive(payload, presenter)
 
+    async def resume_pending(self, presenter: Presenter) -> None:
+        """복원된 세션이 승인 대기 중이면 같은 리뷰를 다시 묻고 이어서 실행 (#11)."""
+        if self.lock.locked():
+            await presenter.notice("이전 요청을 처리 중입니다. 완료 후 다시 시도해주세요.")
+            return
+        async with self.lock:
+            pending = await self.pending_review()
+            if pending is None:
+                return
+            decision = await presenter.ask_review(pending)
+            if decision is None:
+                await presenter.notice("⏸ 승인 대기 중입니다. 메시지를 입력하면 '수정 요청(revise)'으로 전달됩니다.")
+                return
+            await self._drive(Command(resume=decision), presenter)
+
     async def _drive(self, payload: Any, presenter: Presenter) -> None:
         while True:
             interrupt_value = await self._stream(payload, presenter)
