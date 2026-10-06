@@ -27,10 +27,13 @@ docker compose --profile cuda up --build   # Linux + NVIDIA: amd64 + CUDA 13.0 t
 ## RAG 인덱스 (선택)
 
 ```bash
-python -m my_friend.rag.pipeline build --input papers/ --out data/index
+python -m my_friend.rag.pipeline sync --input papers/ --out data/index        # 추가·수정·삭제를 모두 반영
+python -m my_friend.rag.pipeline sync --input papers/ --out data/index --gc   # + 안 쓰는 캐시 벡터 정리
 ```
 
 `data/index`가 있으면 Scout/Planner가 로컬 논문·코드를 함께 검색합니다.
+`sync`는 `papers/`를 기준으로 인덱스를 다시 맞추고, 임베딩은 `data/embed_cache.sqlite`에서 재사용해서 바뀐 청크만 새로 계산합니다.
+UI는 시작할 때 인덱스를 읽으므로 sync 후에는 UI를 재시작하세요.
 
 ## 테스트
 

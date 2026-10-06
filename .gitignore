@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 data/index/
 data/checkpoints.sqlite*
+data/embed_cache.sqlite*
 workspace/
 .env
 ui/.files/

@@ -9,7 +9,7 @@ x-common: &common
   ports:
     - "${MY_FRIEND_PORT:-8000}:8000"
   volumes:
-    - ./data:/app/data                      # RAG 인덱스 (python -m my_friend.rag.pipeline build ...)
+    - ./data:/app/data                      # RAG 인덱스 + 임베딩 캐시 (python -m my_friend.rag.pipeline sync ...)
     - hf-cache:/cache/huggingface           # bge-m3 가중치 캐시 (재빌드해도 재다운로드 없음)
   restart: unless-stopped
   init: false                               # 이미지에 tini가 PID 1로 들어 있음
