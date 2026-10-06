@@ -7,18 +7,14 @@ from .state import GraphState
 
 
 def route_by_mode(state: GraphState) -> str:
-    """Sparring: scout → sparring → review → partial → validator
-    Full-Build: planner → review → executor → validator → reflector"""
-    return "paper_scout" if state["mode"] == "sparring" else "planner"
+    """scout 이후 분기: 가벼우면 sparring_partner, 무거우면 planner."""
+    return "sparring_partner" if state["mode"] == "sparring" else "planner"
 
 
-def route_after_validation(state: GraphState) -> str:
-    v = state["validation"]
-    if state["mode"] == "full_build":
-        # 통과해도 reflector를 거친다: 누수/OOM/수치 불안정은 forward 성공과 무관
-        return "reflector"
-    # sparring: 통과(또는 spec 없어 skipped)면 종료, 실패만 reflector로
-    return "reflector" if v is not None and v.status == "fail" else END
+def route_after_sparring(state: GraphState) -> str:
+    """에스컬레이션 엣지: sparring 중 새 아키텍처가 필요하다고 판단되면 승인 없이 planner로 직행."""
+    turn = state.get("sparring")
+    return "planner" if turn is not None and turn.escalate else "human_review"
 
 
 def route_after_reflection(state: GraphState) -> str:

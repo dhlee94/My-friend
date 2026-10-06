@@ -9,8 +9,8 @@ pytestmark = pytest.mark.skipif(sys.version_info < (3, 11), reason="interrupt() 
 pytest.importorskip("torch")
 
 from my_friend.agents.base import AgentDeps  # noqa: E402
-from my_friend.agents.schemas import CodeBundle, CodeFile, Reflection, RouteDecision  # noqa: E402
-from my_friend.graph.builder import build_graph  # noqa: E402
+from my_friend.agents.schemas import CodeBundle, CodeFile, Reflection, RouteDecision, ScoutSearchPlan  # noqa: E402
+from my_friend.graph.builder import build_graph, make_async_checkpointer  # noqa: E402
 from my_friend.tools.sandbox import SubprocessSandbox  # noqa: E402
 from tests.graph.fixtures import CAUSAL_FORWARD, ScriptedLLM, model_source, tiny_spec  # noqa: E402
 from ui.runner import GraphRunner  # noqa: E402
@@ -41,6 +41,7 @@ class RecordingPresenter:
 
 def full_build_llm(**extra):
     return ScriptedLLM({
+        ScoutSearchPlan: [ScoutSearchPlan(arxiv_query="q", local_query="q")],
         RouteDecision: [RouteDecision(mode="full_build", reason="new")],
         type(tiny_spec()): [tiny_spec(), tiny_spec(name="v2")],
         CodeBundle: [CodeBundle(files=[CodeFile(path="model.py", content=model_source(CAUSAL_FORWARD))],
@@ -50,8 +51,8 @@ def full_build_llm(**extra):
     })
 
 
-def make_runner(llm):
-    graph = build_graph(AgentDeps(llm=llm, sandbox=SubprocessSandbox(timeout_s=120)))
+def make_runner(llm, checkpointer=None):
+    graph = build_graph(AgentDeps(llm=llm, sandbox=SubprocessSandbox(timeout_s=120)), checkpointer)
     return GraphRunner(graph, "t1")
 
 
@@ -64,7 +65,7 @@ def test_stream_review_loop_with_buttons():
     assert p.reviews == ["plan", "plan"]
     started = [e[1] for e in p.events if e[0] == "start"]
     # human_review가 interrupt마다 2번 시작: interrupt 시 1회 + resume 시 노드를 '처음부터' 재실행 1회
-    assert started == ["router", "planner", "human_review", "human_review", "planner", "human_review",
+    assert started == ["turn_start", "paper_scout", "router", "planner", "human_review", "human_review", "planner", "human_review",
                        "human_review", "executor", "validator", "reflector"]
     # 모든 start에는 대응하는 end가 있어야 UI 스피너가 남지 않는다
     assert sorted(e[1] for e in p.events if e[0] == "start") == sorted(e[1] for e in p.events if e[0] == "end")
@@ -157,3 +158,26 @@ def test_event_loop_not_blocked_by_sync_nodes():
     ticks, elapsed = asyncio.run(scenario())
     # validator subprocess(torch import)만 해도 ~1s 이상 → 블로킹이었다면 tick이 거의 없어야 함
     assert elapsed > 0.5 and ticks > elapsed / 0.01 * 0.3
+
+
+def test_async_sqlite_checkpointer_restores_pending_review(tmp_path):
+    """UI 경로(astream/aget_state)는 AsyncSqliteSaver. 재시작(새 그래프 + 새 커넥션) 후에도 승인 대기 상태가 남는다."""
+    db = tmp_path / "ckpt.sqlite"
+
+    async def scenario():
+        r1 = make_runner(full_build_llm(), await make_async_checkpointer(db))
+        await r1.handle_user_message("모델 설계", RecordingPresenter([]))      # plan 승인 대기에서 멈춤
+        await r1.graph.checkpointer.conn.close()
+
+        llm2 = full_build_llm()
+        r2 = make_runner(llm2, await make_async_checkpointer(db))
+        pending = await r2.pending_review()
+        p = RecordingPresenter([{"action": "approve", "feedback": ""}])
+        await r2.handle_user_message("승인", p)                                # 자유 입력 → revise
+        await r2.graph.checkpointer.conn.close()
+        return pending, p, llm2
+
+    pending, p, llm2 = asyncio.run(scenario())
+    assert pending["kind"] == "plan"
+    started = [e[1] for e in p.events if e[0] == "start"]
+    assert started[0] == "human_review" and started[-3:] == ["executor", "validator", "reflector"]

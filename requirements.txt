@@ -10,6 +10,7 @@
 anthropic>=1.11,<2
 langgraph>=1.2,<2
 langgraph-checkpoint>=4.2,<5
+langgraph-checkpoint-sqlite>=3.1,<4   # 세션 영속화 (aiosqlite 포함)
 pydantic>=2.7,<3
 typing_extensions>=4.12
 

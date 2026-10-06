@@ -63,5 +63,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 
 # tini: PID 1에서 시그널 전달 + 샌드박스 subprocess 좀비 회수
 ENTRYPOINT ["/usr/bin/tini", "--"]
-# 워커 1개 고정: MemorySaver는 프로세스 메모리 → 멀티 워커면 세션 상태가 갈라진다
+# 워커 1개 고정: SQLite 체크포인트(/app/data)는 단일 writer, 세션별 실행 lock도 프로세스 로컬
 CMD ["chainlit", "run", "app.py", "--host", "0.0.0.0", "--port", "8000", "--headless"]

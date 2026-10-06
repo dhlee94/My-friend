@@ -19,7 +19,8 @@ Treat dimension mismatches, silent broadcasting and wrong reduction axes as the 
 """
 
 ROUTER = PERSONA + """
-Role: router. Classify the user's latest request.
+Role: router. Classify the user's latest request. The scout digest (recent papers / trends) has \
+already been gathered; use it to judge how much design work the request implies.
 - "sparring": questions, discussion, explanations, or a localized change to existing code \
 (one layer, one function, a hyperparameter, a bug fix).
 - "full_build": designing and implementing a new model or a substantial rewrite that needs a \
@@ -48,7 +49,9 @@ current code.
 - End with the questions whose answers would change the design.
 - Only fill `proposed_change` when a concrete, localized code change has been agreed or is clearly \
 requested; name exact target symbols from the code outline, and state expected shape changes.
-- If the request actually needs a new architecture, say so and recommend switching to full build.
+- Set `escalate` to true when the discussion has outgrown a localized change (a new architecture, a \
+substantial rewrite, or a shape specification is needed). The planner then takes over directly, so \
+leave `proposed_change` null and explain the hand-off in `reply`.
 """
 
 PLANNER = PERSONA + """

@@ -1,4 +1,4 @@
-"""E2E 그래프 흐름: 시나리오 LLM + 실제 subprocess 샌드박스(torch) + MemorySaver."""
+"""E2E 그래프 흐름: 시나리오 LLM + 실제 subprocess 샌드박스(torch) + MemorySaver / SqliteSaver."""
 import pytest
 
 from my_friend.agents.base import AgentDeps
@@ -17,8 +17,8 @@ from my_friend.agents.schemas import (
     SymbolPatch,
     TradeOff,
 )
-from my_friend.graph.builder import build_graph
-from my_friend.graph.routing import route_after_reflection, route_after_validation
+from my_friend.graph.builder import build_graph, make_checkpointer
+from my_friend.graph.routing import route_after_reflection, route_after_sparring, route_by_mode
 from my_friend.graph.session import Session
 from my_friend.tools.arxiv import ArxivEntry
 from my_friend.tools.sandbox import SubprocessSandbox
@@ -37,10 +37,10 @@ class FakeArxiv:
         return [ArxivEntry("2401.00001v1", "Causal Conv Forecasting", "abstract", "2024-01-01", ["A"], ["cs.LG"])]
 
 
-def make(script, **deps_kw):
+def make(script, checkpointer=None, thread_id=None, **deps_kw):
     llm = ScriptedLLM(script)
     deps = AgentDeps(llm=llm, sandbox=SubprocessSandbox(timeout_s=120), **deps_kw)
-    return llm, Session(build_graph(deps))
+    return llm, Session(build_graph(deps, checkpointer), thread_id=thread_id)
 
 
 CHANGE = ChangeRequest(
@@ -53,13 +53,14 @@ PATCH = PatchSet(patches=[SymbolPatch(file="model.py", symbol="TinyTS.forward", 
                  new_files=[], notes="causal padding")
 
 
-def sparring_turn(change=None, reply="좌측 패딩으로 바꾸면 미래 누수가 사라집니다."):
+def sparring_turn(change=None, reply="좌측 패딩으로 바꾸면 미래 누수가 사라집니다.", escalate=False):
     return SparringTurn(
         reply=reply,
         options=[TradeOff(option="left pad", pros="causal", cons="none", complexity="O(BTD²k)")],
         recommendation="left pad",
         questions=["dilation도 쓸까요?"],
         proposed_change=change,
+        escalate=escalate,
     )
 
 
@@ -74,11 +75,17 @@ def scout_steps():
     }
 
 
+def scout_plans(n=1):
+    """arxiv/retriever 없이 scout가 돌 때: 검색 계획 LLM 호출만 일어나고 요약(ScoutReport)은 생략된다."""
+    return {ScoutSearchPlan: [ScoutSearchPlan(arxiv_query="q", local_query="q")] * n}
+
+
 # ------------------------------------------------------------------ full build
 def test_full_build_plan_revise_approve_build_validate_reflect():
     spec_v1 = tiny_spec(name="TinyTS-v1")
     spec_v2 = tiny_spec(name="TinyTS-v2")
     llm, s = make({
+        **scout_plans(),
         RouteDecision: [RouteDecision(mode="full_build", reason="new model")],
         type(spec_v1): [spec_v1, spec_v2],
         CodeBundle: [CodeBundle(files=[CodeFile(path="model.py", content=model_source(CAUSAL_FORWARD)),
@@ -89,6 +96,9 @@ def test_full_build_plan_revise_approve_build_validate_reflect():
 
     r = s.send("시계열 예측용 causal conv 모델을 새로 설계해줘")
     assert r.pending_review["kind"] == "plan" and "TinyTS-v1" in r.pending_review["body"]
+    # 시작은 무조건 scout → router → planner
+    assert [m["name"] for m in r.new_messages] == ["user", "paper_scout", "planner"]
+    assert [n for n, _, _ in llm.calls] == ["ScoutSearchPlan", "RouteDecision", "ModelSpec"]
     assert set(r.pending_review["options"]) == {"approve", "revise", "reject"}
 
     r = s.resume("revise", "dilation 없이 가자")
@@ -110,6 +120,7 @@ def test_full_build_plan_revise_approve_build_validate_reflect():
 
 def test_full_build_reflector_patches_leak_then_accepts():
     llm, s = make({
+        **scout_plans(),
         RouteDecision: [RouteDecision(mode="full_build", reason="new")],
         type(tiny_spec()): [tiny_spec()],
         CodeBundle: [CodeBundle(files=[CodeFile(path="model.py", content=model_source(LEAKY_FORWARD))],
@@ -140,6 +151,7 @@ def test_reflector_iteration_budget_stops_loop():
     leak = Reflection(diagnosis="누수", action="patch", change=CHANGE,
                       risks=[Risk(category="leakage", severity="high", evidence="e", fix="f")])
     llm, s = make({
+        **scout_plans(),
         RouteDecision: [RouteDecision(mode="full_build", reason="new")],
         type(tiny_spec()): [tiny_spec()],
         CodeBundle: [CodeBundle(files=[CodeFile(path="model.py", content=model_source(LEAKY_FORWARD))],
@@ -165,8 +177,10 @@ def test_sparring_tikitaka_then_partial_update_on_previous_build():
         type(tiny_spec()): [tiny_spec()],
         CodeBundle: [CodeBundle(files=[CodeFile(path="model.py", content=model_source(LEAKY_FORWARD))],
                                 entry_file="model.py", notes="")],
-        Reflection: [Reflection(diagnosis="사용자 판단 필요", risks=[], action="ask_user", change=None)],
-        **scout_steps(),
+        Reflection: [Reflection(diagnosis="사용자 판단 필요", risks=[], action="ask_user", change=None),
+                     Reflection(diagnosis="누수 해결", risks=[], action="accept", change=None)],
+        ScoutSearchPlan: [scout_steps()[ScoutSearchPlan][0]] * 2,
+        ScoutReport: [scout_steps()[ScoutReport][0]] * 2,
         SparringTurn: [sparring_turn(change=None, reply="패딩 방식부터 정하죠."), sparring_turn(change=CHANGE)],
         PatchSet: [PATCH],
     }, arxiv=arxiv)
@@ -183,12 +197,14 @@ def test_sparring_tikitaka_then_partial_update_on_previous_build():
     assert r.state["iteration"] == 0 and r.state["reflection"] is None     # 턴 단위 초기화
     assert r.pending_review["kind"] == "proposal" and "escalate" in r.pending_review["options"]
     assert [p.arxiv_id for p in r.state["scout"].papers] == ["2401.00001v1"]  # 환각 id 제거
-    assert arxiv.queries == ['abs:"causal convolution"']
+    assert arxiv.queries == ['abs:"causal convolution"'] * 2           # 턴마다 scout 선행
+    router_prompt = [u for n, u, _ in llm.calls if n == "RouteDecision"][-1]
+    assert "<scout_digest>" in router_prompt                              # router가 scout 결과를 본다
 
     r = s.resume("approve")                                 # 아직 change 없음 → 승인해도 아무 것도 안 함
     assert r.done and r.state["validation"] is None
 
-    # 티키타카: revise로 대화 이어가기 (scout는 재실행 안 함)
+    # 티키타카: revise로 대화 이어가기 (revise 루프에서는 scout 재실행 안 함)
     llm.queues[RouteDecision].append(RouteDecision(mode="sparring", reason="cont"))
     llm.queues[SparringTurn].appendleft(sparring_turn(change=None))
     llm.queues[ScoutSearchPlan].append(scout_steps()[ScoutSearchPlan][0])
@@ -203,9 +219,26 @@ def test_sparring_tikitaka_then_partial_update_on_previous_build():
     r = s.resume("approve")
     assert r.done
     assert r.state["validation"].status == "pass"           # 이전 턴 spec으로 forward + leakage 재검증
+    assert r.state["reflection"].action == "accept"         # 수렴점: sparring 트랙도 reflector 최종 검수
     assert "left pad only" in r.state["files"]["model.py"]
-    assert [m["name"] for m in r.new_messages][-2:] == ["partial_executor", "validator"]
+    assert [m["name"] for m in r.new_messages][-3:] == ["partial_executor", "validator", "reflector"]
     assert llm.remaining() == {}
+
+
+def test_sparring_auto_escalates_to_planner():
+    """에스컬레이션 엣지: sparring_partner가 escalate=True면 사용자 승인 없이 planner로 직행."""
+    llm, s = make({
+        RouteDecision: [RouteDecision(mode="sparring", reason="q")],
+        **scout_steps(),
+        SparringTurn: [sparring_turn(change=CHANGE, reply="국소 수정으로는 안 됩니다.", escalate=True)],
+        type(tiny_spec()): [tiny_spec()],
+    }, arxiv=FakeArxiv())
+    r = s.send("attention을 SSM으로 통째로 바꾸면?")
+    assert r.pending_review["kind"] == "plan"
+    assert r.state["mode"] == "full_build" and r.state["change"] is None
+    assert [m["name"] for m in r.new_messages] == ["user", "paper_scout", "sparring_partner", "planner"]
+    planner_prompt = next(u for n, u, _ in llm.calls if n == "ModelSpec")
+    assert "<scout_digest>" in planner_prompt and "국소 수정으로는 안 됩니다." in planner_prompt
 
 
 def test_sparring_escalate_to_full_build():
@@ -218,6 +251,30 @@ def test_sparring_escalate_to_full_build():
     s.send("새 아키텍처가 필요할까?")
     r = s.resume("escalate", "그냥 새로 설계하자")
     assert r.pending_review["kind"] == "plan" and r.state["mode"] == "full_build"
+
+
+def test_sqlite_checkpointer_survives_restart(tmp_path):
+    """프로세스 재시작 = 새 그래프 + 새 커넥션. 같은 thread_id면 승인 대기 상태부터 이어간다."""
+    db = tmp_path / "ckpt.sqlite"
+    script = {
+        **scout_plans(),
+        RouteDecision: [RouteDecision(mode="full_build", reason="new")],
+        type(tiny_spec()): [tiny_spec()],
+    }
+    _, s1 = make(script, checkpointer=make_checkpointer(db))
+    s1.send("모델 만들어줘")
+    assert s1.pending_review()["kind"] == "plan"
+
+    llm2, s2 = make({
+        CodeBundle: [CodeBundle(files=[CodeFile(path="model.py", content=model_source(CAUSAL_FORWARD))],
+                                entry_file="model.py", notes="")],
+        Reflection: [Reflection(diagnosis="ok", risks=[], action="accept", change=None)],
+    }, checkpointer=make_checkpointer(db), thread_id=s1.thread_id)
+    assert s2.pending_review()["kind"] == "plan"
+    r = s2.resume("approve")
+    assert r.done and r.state["validation"].status == "pass"
+    assert r.state["spec"].name == "TinyTS"                 # pydantic 상태가 sqlite 왕복 후 복원
+    assert llm2.remaining() == {}
 
 
 def test_explicit_mode_skips_router_llm():
@@ -236,12 +293,10 @@ def test_send_while_review_pending_raises():
 
 # ----------------------------------------------------------------- routing
 def test_routing_tables():
-    from my_friend.agents.schemas import ValidationReport
-
-    ok, bad = ValidationReport(status="pass"), ValidationReport(status="fail")
-    assert route_after_validation({"mode": "full_build", "validation": ok}) == "reflector"
-    assert route_after_validation({"mode": "sparring", "validation": ok}) == "__end__"
-    assert route_after_validation({"mode": "sparring", "validation": bad}) == "reflector"
+    assert route_by_mode({"mode": "sparring"}) == "sparring_partner"
+    assert route_by_mode({"mode": "full_build"}) == "planner"
+    assert route_after_sparring({"sparring": sparring_turn(escalate=True)}) == "planner"
+    assert route_after_sparring({"sparring": sparring_turn()}) == "human_review"
     patch = Reflection(diagnosis="", risks=[], action="patch", change=CHANGE)
     assert route_after_reflection({"reflection": patch, "iteration": 3, "max_iterations": 3}) == "partial_executor"
     assert route_after_reflection({"reflection": patch, "iteration": 4, "max_iterations": 3}) == "__end__"
