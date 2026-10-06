@@ -46,8 +46,8 @@ def _main(argv: Optional[List[str]] = None) -> None:
     b.add_argument("--input", type=Path, required=True, help="*.md 디렉토리")
     b.add_argument("--out", type=Path, required=True)
     b.add_argument("--model", default="BAAI/bge-m3")
-    b.add_argument("--max-tokens", type=int, default=512)
-    b.add_argument("--overlap", type=int, default=64)
+    b.add_argument("--max-tokens", type=int, default=768)
+    b.add_argument("--overlap", type=int, default=128)
 
     s = sub.add_parser("search")
     s.add_argument("--index", type=Path, required=True)

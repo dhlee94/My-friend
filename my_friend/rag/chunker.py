@@ -148,8 +148,9 @@ def _default_token_counter(encoding: str = "cl100k_base") -> Callable[[str], int
 class MarkdownChunker:
     def __init__(
         self,
-        max_tokens: int = 512,
-        overlap_tokens: int = 64,
+        # 768/128: 한국어 질의 24개 평가(2026-10)에서 rewrite 경로 MRR 0.95 (512/64는 0.91), 청크 수 -21%
+        max_tokens: int = 768,
+        overlap_tokens: int = 128,
         max_header_level: int = 3,
         token_counter: Optional[Callable[[str], int]] = None,
     ) -> None:

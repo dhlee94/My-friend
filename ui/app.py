@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys
 import uuid
 from pathlib import Path
@@ -38,7 +37,7 @@ from my_friend.core.llm import build_llms, models_from_env  # noqa: E402
 from my_friend.graph.builder import build_graph, make_async_checkpointer  # noqa: E402
 from my_friend.tools.arxiv import ArxivClient  # noqa: E402
 from my_friend.tools.sandbox import SubprocessSandbox  # noqa: E402
-from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md  # noqa: E402
+from ui.render import chain_conflicts, shape_table, spec_to_mermaid, validation_summary_md, workflow_mermaid  # noqa: E402
 from ui.runner import GraphRunner  # noqa: E402
 
 REVIEW_TIMEOUT_S = int(os.environ.get("REVIEW_TIMEOUT_S", "3600"))
@@ -237,8 +236,7 @@ async def on_chat_start() -> None:
         Slider(id="max_iterations", label="Reflector 자동 수정 최대 횟수", initial=3, min=0, max=6, step=1),
     ]).send()
     workflow = cl.CustomElement(name="Mermaid", display="inline",
-                                # draw_mermaid()는 <p> 라벨을 쓰는데 strict 모드에선 태그가 글자로 보이므로 제거
-                                props={"code": re.sub(r"</?p>", "", graph.get_graph().draw_mermaid()),
+                                props={"code": workflow_mermaid(graph.get_graph().draw_mermaid()),
                                        "title": "my-friend workflow"})
     await cl.Message(
         author="my-friend",
