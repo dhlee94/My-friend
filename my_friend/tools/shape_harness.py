@@ -5,7 +5,8 @@
 단계:
   1. import / build
   2. meta pass   : torch.device("meta") 위 forward — 연산 비용 0으로 shape 체인 추적.
-                   nonzero/masked_select/.item() 등 data-dependent op은 meta에서 실패 → 실측으로 폴백.
+                   nonzero/.item() 등 data-dependent op, meta kernel이 없는 op(unique/masked_select)은
+                   meta에서 실패 → 실측으로 폴백. 원인(종류/op/모듈/코드 줄)은 meta_detail에 기록.
   3. real pass   : torch.randn 더미 입력으로 forward + backward (NaN/Inf, unused param, activation 메모리)
   4. shape check : planner 명세의 module output shape과 실측 비교
   5. leakage     : causal 축의 t0 이후 입력을 교란 → 출력[:t0]이 변하면 미래 정보 누수
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import time
 import traceback
@@ -114,6 +116,75 @@ def _load_class(cfg: dict):
     return getattr(module, cfg["entry_class"])
 
 
+# meta 텐서의 "값"을 읽으려 할 때 나는 메시지 (torch 2.14 기준 실측)
+_DATA_DEP_MARKERS = (
+    "item() cannot be called on meta", "cannot copy out of meta", "data-dependent", "no data!",
+    "raises unimplemented by default",          # nonzero: 출력 크기가 값에 의존
+    "without output_size",                       # repeat_interleave(tensor repeats)
+    "can't convert meta device type tensor",     # .numpy()
+)
+
+
+def _classify_meta_error(exc: BaseException) -> tuple:
+    """(kind, op). kind: data_dependent | unsupported_op | shape_error | error.
+    shape_error는 meta에서도 잡히는 진짜 shape 버그 — real pass도 같은 곳에서 실패할 가능성이 높다."""
+    msg = str(exc)
+    low = msg.lower()
+    m = re.search(r"\baten::([\w.]+)", msg) or re.search(r"\btorch\.([\w.]+)\(\)", msg) \
+        or re.search(r"\bTensor\.(\w+)\(\)", msg)
+    op = m.group(1) if m else None
+    if any(k.lower() in low for k in _DATA_DEP_MARKERS):
+        return "data_dependent", op
+    if "no fake impl or meta kernel registered" in low or ("could not run" in low and "'meta' backend" in low):
+        return "unsupported_op", op
+    if isinstance(exc, RuntimeError):
+        return "shape_error", op
+    return "error", op
+
+
+def _user_frame(tb, workdir: str) -> Optional[str]:
+    """traceback에서 생성 코드(workdir 안 파일)의 가장 안쪽 프레임 → 'model.py:42  idx = torch.nonzero(m)'."""
+    hit = None
+    for fs in traceback.extract_tb(tb):
+        if fs.filename.startswith(workdir.rstrip("/") + "/"):
+            hit = f"{fs.filename[len(workdir.rstrip('/')) + 1:]}:{fs.lineno}  {(fs.line or '').strip()}"
+    return hit
+
+
+def _meta_pass(cfg: dict, cls) -> tuple:
+    """torch.device('meta')에서 build + forward. 실패하면 (kind, detail)로 원인을 구조화해 돌려준다.
+    module은 실패 시점에 forward 중이던 가장 안쪽 서브모듈 (pre-hook push / hook pop 스택)."""
+    stage, active, handles = "build", [], []
+
+    def push(path: str):
+        def fn(_m, _inp):
+            active.append(path)                   # 반환값 None 필수: hook이 값을 돌려주면 입력/출력이 바뀐다
+        return fn
+
+    def pop(_m, _inp, _out):
+        if active:
+            active.pop()
+    try:
+        with torch.device("meta"):
+            meta_model = cls(**cfg.get("init_kwargs", {}))
+        stage = "forward"
+        for name, m in meta_model.named_modules():
+            handles.append(m.register_forward_pre_hook(push(name or "<root>")))
+            handles.append(m.register_forward_hook(pop))
+        meta_in = _make_inputs(cfg["inputs"], "meta")
+        with torch.no_grad():
+            meta_model(*meta_in)
+        return "ok", None
+    except Exception as e:  # noqa: BLE001 — meta 실패는 리포트용 정보일 뿐
+        kind, op = _classify_meta_error(e)
+        return kind, {"kind": kind, "stage": stage, "op": op, "module": active[-1] if active else None,
+                      "location": _user_frame(e.__traceback__, cfg["workdir"]),
+                      "error": f"{type(e).__name__}: {str(e)[:300]}"}
+    finally:
+        for h in handles:
+            h.remove()
+
+
 def run(cfg: dict) -> dict:
     rep: Dict[str, Any] = {"status": "pass", "failed_stage": None, "error": None, "traceback": None}
     t_start = time.time()
@@ -139,21 +210,9 @@ def run(cfg: dict) -> dict:
     # Adam: weight + grad + exp_avg + exp_avg_sq (fp32) ≈ 16B/param
     rep["est_adam_state_mb"] = round(n_params * 16 / 2**20, 3)
 
-    # ---- 2. meta pass
+    # ---- 2. meta pass: 실패해도 판정에는 쓰지 않는다 (real pass가 기준) — 원인만 meta_detail에 남긴다
     if cfg.get("meta_pass", True):
-        try:
-            with torch.device("meta"):
-                meta_model = cls(**cfg.get("init_kwargs", {}))
-            meta_in = _make_inputs(cfg["inputs"], "meta")
-            with torch.no_grad():
-                meta_model(*meta_in)
-            rep["meta_pass"] = "ok"
-        except (NotImplementedError, RuntimeError) as e:
-            msg = str(e)
-            data_dep = any(k in msg.lower() for k in ("meta", "data-dependent", "item()", "nonzero", "cannot be"))
-            rep["meta_pass"] = "data_dependent" if data_dep else f"error: {type(e).__name__}: {msg[:300]}"
-        except Exception as e:  # noqa: BLE001
-            rep["meta_pass"] = f"error: {type(e).__name__}: {str(e)[:300]}"
+        rep["meta_pass"], rep["meta_detail"] = _meta_pass(cfg, cls)
 
     # ---- 3. real pass
     device = cfg.get("device", "cpu")

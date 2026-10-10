@@ -167,12 +167,24 @@ class LightningProbe(BaseModel):
     error: Optional[str] = None
 
 
+class MetaDetail(BaseModel):
+    """meta pass가 실패한 원인. 판정에는 쓰지 않지만 '왜 실측으로 폴백했는지'를 사람/reflector가 볼 수 있게."""
+
+    kind: str                                # data_dependent | unsupported_op | shape_error | error
+    stage: str                               # build | forward
+    op: Optional[str] = None                 # nonzero, item, _unique2 ...
+    module: Optional[str] = None             # 실패 시점에 forward 중이던 가장 안쪽 서브모듈
+    location: Optional[str] = None           # 생성 코드의 file:line + 그 줄
+    error: str = ""
+
+
 class ValidationReport(BaseModel):
     status: Literal["pass", "fail", "skipped"]
     failed_stage: Optional[str] = None      # compile | import | build | forward | backward | shape | numerical | leakage | lightning | tests
     error: Optional[str] = None
     traceback: Optional[str] = None
-    meta_pass: Optional[str] = None         # ok | data_dependent | error: ...
+    meta_pass: Optional[str] = None         # ok | data_dependent | unsupported_op | shape_error | error
+    meta_detail: Optional[MetaDetail] = None
     shape_log: List[ShapeRecord] = []
     shape_mismatches: List[str] = []
     param_count: int = 0

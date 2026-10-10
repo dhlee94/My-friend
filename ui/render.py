@@ -328,6 +328,11 @@ def validation_summary_md(v: ValidationReport) -> str:
             f"| {v.param_count:,} | {v.param_mb:.1f} MB | {v.activation_mb:.2f} MB | "
             f"{v.est_train_activation_mb:.0f} MB | {v.est_adam_state_mb:.0f} MB | {v.meta_pass} |"
         )
+    if v.meta_detail:
+        d = v.meta_detail
+        where = " · ".join(x for x in (f"op `{d.op}`" if d.op else "", f"module `{d.module}`" if d.module else "",
+                                       f"`{d.location}`" if d.location else "", f"stage `{d.stage}`") if x)
+        lines.append(f"**Meta pass** `{d.kind}` → 실측으로 폴백 · {where}\n> {d.error}")
     if v.leakage.checked:
         lines.append(f"**Leakage probe:** {'🚨 LEAK' if v.leakage.leaked else 'ok'} (max\\|Δ\\|={v.leakage.max_abs_diff:.2e}) — {v.leakage.detail}")
     lt = v.lightning
