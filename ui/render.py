@@ -245,7 +245,8 @@ def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) 
             lines.append(f'  {src} -.->|"{_q(a)} → {_q(b)} ({kind}){extra}"| {dst}')
         else:
             lines.append(f'  {src} -->|"⚠ {_q(a)} ≠ {_q(b)}{_numel_note(out_dims, in_dims, values)}{extra}"| {dst}')
-            styles.append(f"  linkStyle {link_idx} stroke:#dc2626,stroke-width:2px,color:#dc2626")
+            # 라벨 글자 #b91c1c: 라이트 라벨 배경(#e8e8e8) 위 5.3:1. 다크에서는 Mermaid.jsx가 밝은 빨강으로 바꾼다
+            styles.append(f"  linkStyle {link_idx} stroke:#dc2626,stroke-width:2px,color:#b91c1c")
         link_idx += 1
 
     if nodes:
