@@ -80,6 +80,8 @@ def test_harness_shape_mismatch_and_runtime_error(sandbox):
     v = sandbox.validate({"model.py": model_source(CAUSAL_FORWARD)}, bad_spec, "model.py")
     assert v.status == "fail" and v.failed_stage == "forward"
     assert "mat1 and mat2" in v.error
+    # meta에서도 같은 버그가 먼저 잡힌다 — 위치가 proj로 찍혀야 함
+    assert v.meta_pass == "shape_error" and v.meta_detail.module == "proj" and v.meta_detail.stage == "forward"
 
     spec = tiny_spec()
     spec.modules[1].output_shape = ["B", "T", "D"]   # 명세 쪽이 틀린 경우도 mismatch로 드러나야 함
@@ -94,14 +96,40 @@ def test_harness_compile_error_and_no_spec(sandbox):
     assert v.status == "skipped"
 
 
-def test_harness_meta_fallback_for_data_dependent_ops(sandbox):
-    fwd = CAUSAL_FORWARD.replace(
+def _with_extra_op(line: str) -> str:
+    return CAUSAL_FORWARD.replace(
         "return self.head(h.transpose(1, 2))        # (B, T, 1)",
-        "y = self.head(h.transpose(1, 2))\n    _ = torch.nonzero(y > 0)\n    return y",
+        f"y = self.head(h.transpose(1, 2))\n    {line}\n    return y",
     )
-    v = sandbox.validate({"model.py": model_source(fwd)}, tiny_spec(), "model.py")
+
+
+def test_harness_meta_fallback_for_data_dependent_ops(sandbox):
+    v = sandbox.validate({"model.py": model_source(_with_extra_op("_ = torch.nonzero(y > 0)"))}, tiny_spec(), "model.py")
+    assert v.status == "pass", v.error                       # meta 실패는 판정에 영향 없음
+    d = v.meta_detail
+    assert v.meta_pass == "data_dependent" and d.kind == "data_dependent"
+    assert d.op == "nonzero" and d.stage == "forward" and d.module == "<root>"
+    assert d.location.startswith("model.py:") and "torch.nonzero(y > 0)" in d.location
+
+
+def test_harness_meta_reports_op_without_meta_kernel(sandbox):
+    v = sandbox.validate({"model.py": model_source(_with_extra_op("_ = torch.unique(y)"))}, tiny_spec(), "model.py")
     assert v.status == "pass", v.error
-    assert v.meta_pass != "ok"
+    assert v.meta_pass == "unsupported_op" and v.meta_detail.op == "_unique2"
+
+
+def test_harness_meta_failure_in_constructor(sandbox):
+    src = model_source(CAUSAL_FORWARD).replace(
+        "self.kernel = kernel", "self.kernel = int(torch.tensor(kernel).item())")
+    v = sandbox.validate({"model.py": src}, tiny_spec(), "model.py")
+    assert v.status == "pass", v.error
+    d = v.meta_detail
+    assert d.kind == "data_dependent" and d.stage == "build" and d.module is None and ".item()" in d.location
+
+
+def test_harness_meta_ok_has_no_detail(sandbox):
+    v = sandbox.validate({"model.py": model_source(CAUSAL_FORWARD)}, tiny_spec(), "model.py")
+    assert v.meta_pass == "ok" and v.meta_detail is None
 
 
 GOOD_TEST = """import torch
