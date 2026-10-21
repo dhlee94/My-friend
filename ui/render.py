@@ -101,6 +101,7 @@ class _Node:
     output_shape: List[str]
     members: List[str]            # 실측 색칠에 쓰는 원래 모듈 경로들
     repeat: int = 1
+    role_varies: bool = False     # 접힌 반복들의 role이 서로 다름 (dilation=1,2,4 …) → 대표 role만 보이는 오해 방지
 
 
 def _short(text: str, n: int = ROLE_MAX_CHARS) -> str:
@@ -164,9 +165,11 @@ def _layout_nodes(spec: ModelSpec) -> List[Tuple[List[_Node], int]]:
                 for pos, k in enumerate(run[0][1]):
                     m, rest = mods[k], _INDEXED.match(mods[k].path)["rest"]
                     shown = f"{prefix}.[{first_idx}‥{last_idx}]" + (f".{rest}" if rest else "")
+                    roles = {" ".join(mods[unit[pos]].role.split()) for _, unit in run}
                     nodes.append(_Node(_sid("m", f"{prefix}.x.{rest or ''}"), shown, prefix.split(".")[0], m.role,
                                        m.complexity, m.input_shape, m.output_shape,
-                                       [mods[unit[pos]].path for _, unit in run], repeat=len(run)))
+                                       [mods[unit[pos]].path for _, unit in run], repeat=len(run),
+                                       role_varies=len(roles) > 1))
                 out.append((nodes, len(run)))
             else:
                 for _, unit in run:
@@ -178,6 +181,11 @@ def _layout_nodes(spec: ModelSpec) -> List[Tuple[List[_Node], int]]:
         if n is not None:
             n.members.append(c)
     return out
+
+
+def _first_idx(n: _Node) -> str:
+    h = _INDEXED.match(n.members[0])
+    return h["idx"] if h else "첫 반복"
 
 
 def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) -> str:
@@ -216,7 +224,10 @@ def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) 
         seen = [observed[p] for p in n.members if observed.get(p) is not None]
         cls = "mod" if not seen else ("ok" if all(seen) else "bad")
         title = n.path + (f" ×{n.repeat}" if n.repeat > 1 else "")
-        label = [title, _short(n.role), n.complexity]
+        role = _short(n.role)
+        if n.role_varies:                       # 대표(첫 반복) role만 보인다는 걸 명시 — 전체는 명세 표에
+            role = f"{_first_idx(n)}번 기준: {role} (레이어별 상이)"
+        label = [title, role, n.complexity]
         if n.repeat > 1 and cls == "bad":       # 접힌 노드: 어느 반복이 틀렸는지 드러낸다
             bad = [(h["idx"] if (h := _INDEXED.match(p)) else p) for p in n.members if observed.get(p) is False]
             label.append("✗ 불일치: " + ", ".join(bad[:8]) + (" …" if len(bad) > 8 else ""))

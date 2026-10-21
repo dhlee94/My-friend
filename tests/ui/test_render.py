@@ -178,6 +178,7 @@ def test_listed_containers_leave_the_chain_so_layers_collapse():
     code = spec_to_mermaid(_planner_style_spec())
     assert "m_blocks[" not in code and "m_blocks_0[" not in code       # 컨테이너는 단계로 그리지 않음
     assert "blocks.[0‥2].conv1 ×3" in code                             # 인덱스 0도 접힘
+    assert "0번 기준: blocks.0.conv1 (레이어별 상이)" in code            # role이 레이어마다 다르면 명시
     assert "m_blocks_3[" in code                                       # 자식 없는 블록은 그대로 노드
     assert 'subgraph g_blocks["blocks"]' in code
 
@@ -190,3 +191,11 @@ def test_container_mismatch_still_colors_its_first_child():
     code = spec_to_mermaid(_planner_style_spec(), rep)
     line = next(l for l in code.splitlines() if "blocks.[0‥2].conv1" in l)
     assert ":::bad" in line and "✗ 불일치: blocks" in line
+
+
+def test_collapsed_node_with_identical_roles_has_no_varies_note():
+    spec = _planner_style_spec()
+    for m in spec.modules:
+        if m.path.endswith(".conv1"):
+            m.role = "CausalConv1d"
+    assert "레이어별 상이" not in spec_to_mermaid(spec)
