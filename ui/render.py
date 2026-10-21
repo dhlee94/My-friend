@@ -109,8 +109,14 @@ def _short(text: str, n: int = ROLE_MAX_CHARS) -> str:
 
 
 def _layout_nodes(spec: ModelSpec) -> List[Tuple[List[_Node], int]]:
-    """modules를 (노드 묶음, 반복 횟수) 시퀀스로. 반복 1 = 펼친 그대로, n>1 = 같은 구조 n회를 대표 1개로 접음."""
-    mods = spec.modules
+    """modules를 (노드 묶음, 반복 횟수) 시퀀스로. 반복 1 = 펼친 그대로, n>1 = 같은 구조 n회를 대표 1개로 접음.
+
+    planner는 컨테이너(blocks, blocks.0)와 그 자식(blocks.0.conv1)을 한 목록에 섞어 쓴다. 컨테이너를 체인에 넣으면
+    같은 연산이 순차 단계처럼 반복 표시되고, 인덱스 0의 구조만 달라져 접기도 깨진다 → 자식이 나열된 컨테이너는
+    체인에서 빼고, 실측 색칠용으로 첫 자식 노드의 members에 붙인다. 자식 없이 나열된 블록(blocks.3)은 그대로 노드."""
+    paths = [m.path for m in spec.modules]
+    containers = [p for p in paths if any(q.startswith(p + ".") for q in paths)]
+    mods = [m for m in spec.modules if m.path not in containers]
     out: List[Tuple[List[_Node], int]] = []
 
     def plain(i: int) -> _Node:
@@ -167,6 +173,10 @@ def _layout_nodes(spec: ModelSpec) -> List[Tuple[List[_Node], int]]:
                     out.append(([plain(k) for k in unit], 1))
             u = v
         i = j
+    for c in containers:
+        n = next((n for group, _ in out for n in group if any(p.startswith(c + ".") for p in n.members)), None)
+        if n is not None:
+            n.members.append(c)
     return out
 
 
@@ -208,7 +218,7 @@ def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) 
         title = n.path + (f" ×{n.repeat}" if n.repeat > 1 else "")
         label = [title, _short(n.role), n.complexity]
         if n.repeat > 1 and cls == "bad":       # 접힌 노드: 어느 반복이 틀렸는지 드러낸다
-            bad = [_INDEXED.match(p)["idx"] for p in n.members if observed.get(p) is False]
+            bad = [(h["idx"] if (h := _INDEXED.match(p)) else p) for p in n.members if observed.get(p) is False]
             label.append("✗ 불일치: " + ", ".join(bad[:8]) + (" …" if len(bad) > 8 else ""))
         # securityLevel=strict: <br> 외 HTML 태그는 이스케이프되므로 순수 텍스트만 사용
         return f'  {n.node_id}["{"<br>".join(_q(x) for x in label)}"]:::{cls}'
