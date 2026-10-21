@@ -101,6 +101,7 @@ class _Node:
     output_shape: List[str]
     members: List[str]            # 실측 색칠에 쓰는 원래 모듈 경로들
     repeat: int = 1
+    role_varies: bool = False     # 접힌 반복들의 role이 서로 다름 (dilation=1,2,4 …) → 대표 role만 보이는 오해 방지
 
 
 def _short(text: str, n: int = ROLE_MAX_CHARS) -> str:
@@ -109,8 +110,14 @@ def _short(text: str, n: int = ROLE_MAX_CHARS) -> str:
 
 
 def _layout_nodes(spec: ModelSpec) -> List[Tuple[List[_Node], int]]:
-    """modules를 (노드 묶음, 반복 횟수) 시퀀스로. 반복 1 = 펼친 그대로, n>1 = 같은 구조 n회를 대표 1개로 접음."""
-    mods = spec.modules
+    """modules를 (노드 묶음, 반복 횟수) 시퀀스로. 반복 1 = 펼친 그대로, n>1 = 같은 구조 n회를 대표 1개로 접음.
+
+    planner는 컨테이너(blocks, blocks.0)와 그 자식(blocks.0.conv1)을 한 목록에 섞어 쓴다. 컨테이너를 체인에 넣으면
+    같은 연산이 순차 단계처럼 반복 표시되고, 인덱스 0의 구조만 달라져 접기도 깨진다 → 자식이 나열된 컨테이너는
+    체인에서 빼고, 실측 색칠용으로 첫 자식 노드의 members에 붙인다. 자식 없이 나열된 블록(blocks.3)은 그대로 노드."""
+    paths = [m.path for m in spec.modules]
+    containers = [p for p in paths if any(q.startswith(p + ".") for q in paths)]
+    mods = [m for m in spec.modules if m.path not in containers]
     out: List[Tuple[List[_Node], int]] = []
 
     def plain(i: int) -> _Node:
@@ -158,16 +165,27 @@ def _layout_nodes(spec: ModelSpec) -> List[Tuple[List[_Node], int]]:
                 for pos, k in enumerate(run[0][1]):
                     m, rest = mods[k], _INDEXED.match(mods[k].path)["rest"]
                     shown = f"{prefix}.[{first_idx}‥{last_idx}]" + (f".{rest}" if rest else "")
+                    roles = {" ".join(mods[unit[pos]].role.split()) for _, unit in run}
                     nodes.append(_Node(_sid("m", f"{prefix}.x.{rest or ''}"), shown, prefix.split(".")[0], m.role,
                                        m.complexity, m.input_shape, m.output_shape,
-                                       [mods[unit[pos]].path for _, unit in run], repeat=len(run)))
+                                       [mods[unit[pos]].path for _, unit in run], repeat=len(run),
+                                       role_varies=len(roles) > 1))
                 out.append((nodes, len(run)))
             else:
                 for _, unit in run:
                     out.append(([plain(k) for k in unit], 1))
             u = v
         i = j
+    for c in containers:
+        n = next((n for group, _ in out for n in group if any(p.startswith(c + ".") for p in n.members)), None)
+        if n is not None:
+            n.members.append(c)
     return out
+
+
+def _first_idx(n: _Node) -> str:
+    h = _INDEXED.match(n.members[0])
+    return h["idx"] if h else "첫 반복"
 
 
 def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) -> str:
@@ -206,9 +224,12 @@ def spec_to_mermaid(spec: ModelSpec, report: Optional[ValidationReport] = None) 
         seen = [observed[p] for p in n.members if observed.get(p) is not None]
         cls = "mod" if not seen else ("ok" if all(seen) else "bad")
         title = n.path + (f" ×{n.repeat}" if n.repeat > 1 else "")
-        label = [title, _short(n.role), n.complexity]
+        role = _short(n.role)
+        if n.role_varies:                       # 대표(첫 반복) role만 보인다는 걸 명시 — 전체는 명세 표에
+            role = f"{_first_idx(n)}번 기준: {role} (레이어별 상이)"
+        label = [title, role, n.complexity]
         if n.repeat > 1 and cls == "bad":       # 접힌 노드: 어느 반복이 틀렸는지 드러낸다
-            bad = [_INDEXED.match(p)["idx"] for p in n.members if observed.get(p) is False]
+            bad = [(h["idx"] if (h := _INDEXED.match(p)) else p) for p in n.members if observed.get(p) is False]
             label.append("✗ 불일치: " + ", ".join(bad[:8]) + (" …" if len(bad) > 8 else ""))
         # securityLevel=strict: <br> 외 HTML 태그는 이스케이프되므로 순수 텍스트만 사용
         return f'  {n.node_id}["{"<br>".join(_q(x) for x in label)}"]:::{cls}'

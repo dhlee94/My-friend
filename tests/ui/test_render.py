@@ -162,3 +162,40 @@ def test_rank_change_is_reshape_only_when_numel_matches():
     assert 'm_proj -.->|"B×T×D → B×T*D (reshape)"| m_flat' in code          # 256 = 256 → flatten
     assert 'm_flat -.->|"B×1 → B×Z×1 (reshape)"| m_odd' in code             # 모르는 기호 Z → 예전처럼 reshape
     assert chain_conflicts(flat) == []
+
+
+def _planner_style_spec():
+    """실제 planner 출력 형태: 컨테이너(blocks, blocks.0)와 자식(blocks.N.conv1)이 섞이고, 마지막 블록은 자식 없이 나열."""
+    spec = tiny_spec()
+    bdt = ["B", "D", "T"]
+    mk = lambda p: ModuleSpec(path=p, role=p, input_shape=bdt, output_shape=bdt, complexity="O(BTD²K)")
+    spec.modules = [spec.modules[0], mk("blocks"), mk("blocks.0"), mk("blocks.0.conv1"), mk("blocks.1.conv1"),
+                    mk("blocks.2.conv1"), mk("blocks.3"), spec.modules[2]]
+    return spec
+
+
+def test_listed_containers_leave_the_chain_so_layers_collapse():
+    code = spec_to_mermaid(_planner_style_spec())
+    assert "m_blocks[" not in code and "m_blocks_0[" not in code       # 컨테이너는 단계로 그리지 않음
+    assert "blocks.[0‥2].conv1 ×3" in code                             # 인덱스 0도 접힘
+    assert "0번 기준: blocks.0.conv1 (레이어별 상이)" in code            # role이 레이어마다 다르면 명시
+    assert "m_blocks_3[" in code                                       # 자식 없는 블록은 그대로 노드
+    assert 'subgraph g_blocks["blocks"]' in code
+
+
+def test_container_mismatch_still_colors_its_first_child():
+    rep = ValidationReport(status="fail", shape_log=[
+        ShapeRecord(module="blocks", output_shape="2x8x16", expected="2x16x8", ok=False),
+        ShapeRecord(module="blocks.0.conv1", output_shape="2x8x16", expected="2x8x16", ok=True),
+    ])
+    code = spec_to_mermaid(_planner_style_spec(), rep)
+    line = next(l for l in code.splitlines() if "blocks.[0‥2].conv1" in l)
+    assert ":::bad" in line and "✗ 불일치: blocks" in line
+
+
+def test_collapsed_node_with_identical_roles_has_no_varies_note():
+    spec = _planner_style_spec()
+    for m in spec.modules:
+        if m.path.endswith(".conv1"):
+            m.role = "CausalConv1d"
+    assert "레이어별 상이" not in spec_to_mermaid(spec)
